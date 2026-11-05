@@ -137,8 +137,12 @@ if (platform === 'twitch') {
     await app.handlers.get('farming:set')(app.event(), true);
     const player = app.state.windows.at(-1);
     assert.equal(app.apiExports.snapshot().channels[0].watching, true);
+    await app.handlers.get('stores:sequence')(app.event(), app.apiExports.config.channels.slice(0, 2));
+    const store = app.state.windows.at(-1);
     app.session.cookies.emit('changed', {}, { name: 'auth-token', domain: '.twitch.tv' }, 'overwrite', true);
     assert.equal(player.isDestroyed(), false, 'replacement is not a logout');
+    assert.equal(store.isDestroyed(), true, 'account-specific windows must close during revalidation');
+    assert.equal(app.apiExports.snapshot().storeSequence, null);
     assert.equal(app.apiExports.snapshot().channels[0].live, true);
     app.session.cookies.emit('changed', {}, { name: 'auth-token', domain: '.twitch.tv' }, 'inserted-no-change-overwrite', false);
     account.points = 110;
@@ -179,8 +183,50 @@ if (platform === 'twitch') {
     assert.equal(app.apiExports.snapshot().loggedIn, false);
   });
 
+  test('a retained player cannot attribute a new redemption to an unverified previous account', async () => {
+    const app = loadApp();
+    app.apiExports.setupSession();
+    const account = { id: '1', name: 'account_a', points: 100 };
+    setAccountResponses(app, account);
+    await app.apiExports.poll();
+    const slug = app.apiExports.config.channels[0];
+    app.apiExports.status.get(slug).live = true;
+    await app.handlers.get('farming:set')(app.event(), true);
+    const player = app.state.windows.at(-1);
+    const { EventEmitter } = require('node:events');
+    function redemptionFrom(win) {
+      const debuggerApi = new EventEmitter();
+      debuggerApi.isAttached = () => true;
+      debuggerApi.sendCommand = async () => ({ body: '{"data":{"redeemCustomReward":{"redemption":{}}}}' });
+      win.webContents.debugger = debuggerApi;
+      app.apiExports.watchRedemptions(slug, win.webContents);
+      return async () => {
+        debuggerApi.emit('message', {}, 'Network.requestWillBeSent', { requestId: 'purchase', request: {
+          url: 'https://gql.twitch.tv/gql', postData: JSON.stringify({ operationName: 'RedeemCustomReward', variables: { input: { cost: 300, title: '+15% XP' } } }),
+        } });
+        debuggerApi.emit('message', {}, 'Network.loadingFinished', { requestId: 'purchase' });
+        await new Promise(resolve => setImmediate(resolve));
+      };
+    }
+    const redeem = redemptionFrom(player);
+    account.id = '2'; account.name = 'account_b'; account.points = 200;
+    app.session.cookies.emit('changed', {}, { name: 'auth-token', domain: '.twitch.tv' }, 'overwrite', true);
+    app.session.cookies.emit('changed', {}, { name: 'auth-token', domain: '.twitch.tv' }, 'inserted', false);
+    assert.equal(player.isDestroyed(), false);
+    await redeem();
+    assert.equal(app.apiExports.config.purchases.length, 0, 'unverified new-session work must not enter the previous account report');
+    await app.fireTimers(2500);
+    assert.equal(app.apiExports.config.reportAccount, 'id:2');
+    assert.equal(app.apiExports.config.accountReports.find(report => report.account === 'id:1').purchases.length, 0);
+    await app.handlers.get('store:open')(app.event(), slug);
+    await redemptionFrom(app.state.windows.at(-1))();
+    assert.equal(app.apiExports.config.purchases.length, 1, 'verified current-account redemptions still work');
+  });
+
   test('a redemption response completing after logout cannot restore old account state', async () => {
     const app = loadApp();
+    setAccountResponses(app, { id: '1', name: 'account_a', points: 100 });
+    await app.apiExports.poll();
     const { EventEmitter } = require('node:events');
     const debuggerApi = new EventEmitter();
     let release;

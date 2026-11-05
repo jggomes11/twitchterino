@@ -38,15 +38,19 @@ function assertSession(generation) {
   if (sessionTransition || apiClient.generation !== generation) throw new Error('Session changed');
 }
 
-function resetAccountRuntime() {
+function cancelAccountWindows() {
   storeSequence = null;
   const windows = [...storeWindows.values()];
   storeWindows.clear();
   for (const win of windows) if (!win.isDestroyed()) win.destroy();
-  for (const slug of [...watchers.keys()]) stopWatcher(slug);
   chestQueue.length = 0;
   lastClaimTry.clear();
   for (const win of chestWindows) if (!win.isDestroyed()) win.destroy();
+}
+
+function resetAccountRuntime() {
+  cancelAccountWindows();
+  for (const slug of [...watchers.keys()]) stopWatcher(slug);
   status.clear();
 }
 
@@ -146,6 +150,7 @@ function setupSession() {
     verifiedAccountGeneration = -1;
     username = null;
     loggedIn = false;
+    cancelAccountWindows();
     if (ircSend) { const socket = ircSend; ircSend = null; try { socket.close(); } catch {} }
     if (removed) {
       // Chromium removes the previous cookie before inserting its replacement.
@@ -397,9 +402,10 @@ function watchRedemptions(slug, wc) {
     if (sessionTransition || wc.isDestroyed()) return;
     const generation = apiClient.generation;
     if (method === 'Network.requestWillBeSent' && p.request.url.startsWith(GQL)) {
+      if (verifiedAccountGeneration !== generation) return;
       let body = p.request.postData;
       if (!body && p.request.hasPostData) body = (await dbg.sendCommand('Network.getRequestPostData', { requestId: p.requestId }).catch(() => ({}))).postData;
-      if (generation !== apiClient.generation || sessionTransition || wc.isDestroyed() || !body || !body.includes('RedeemCustomReward')) return;
+      if (generation !== apiClient.generation || verifiedAccountGeneration !== generation || sessionTransition || wc.isDestroyed() || !body || !body.includes('RedeemCustomReward')) return;
       try {
         const ops = [].concat(JSON.parse(body));
         const op = ops.find((o) => o.operationName === 'RedeemCustomReward');
@@ -411,7 +417,7 @@ function watchRedemptions(slug, wc) {
       const input = operation.input;
       pending.delete(p.requestId);
       const res = await dbg.sendCommand('Network.getResponseBody', { requestId: p.requestId }).catch(() => null);
-      if (!res || operation.generation !== apiClient.generation || sessionTransition || wc.isDestroyed()) return;
+      if (!res || operation.generation !== apiClient.generation || verifiedAccountGeneration !== apiClient.generation || sessionTransition || wc.isDestroyed()) return;
       let ok = false;
       try {
         const r = [].concat(JSON.parse(res.base64Encoded ? Buffer.from(res.body, 'base64').toString() : res.body))
