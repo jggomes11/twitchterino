@@ -140,6 +140,24 @@ async function freePort() {
     report.layout = await evaluate(main, '({width:innerWidth,height:innerHeight,scrollWidth:document.documentElement.scrollWidth,screenWidth:screen.availWidth,screenHeight:screen.availHeight})');
     await screenshot(main, 'main.png');
 
+    // Diagnose the real unauthenticated channel-query path, not only renderer IPC.
+    if (namespace === 'tt') {
+      let observation;
+      try {
+        observation = await until(async () => {
+          const current = await evaluate(main, 'window.tt.getState()');
+          return current.channels.every(channel => channel.rewardsLoaded || channel.error) ? current : null;
+        }, 'public channel query results', 65000);
+      } catch (error) {
+        report.publicChannelQueryError = error.message;
+        observation = await evaluate(main, 'window.tt.getState()');
+      }
+      report.publicChannels = observation.channels.map(channel => ({
+        slug: channel.slug, live: channel.live, rewardsLoaded: channel.rewardsLoaded, error: channel.error,
+      }));
+      await screenshot(main, 'public-channels.png');
+    }
+
     await evaluate(main, 'document.querySelector("#btn-settings")?.click()');
     await evaluate(main, 'document.querySelector("#notify-bonus").click()');
     await until(async () => (await evaluate(main, 'window.' + namespace + '.getState()')).notifyBonus === true, 'UI checkbox IPC');
