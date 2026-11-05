@@ -1,40 +1,53 @@
 # Twitchterino
 
-App para Windows e Linux que acompanha os canais parceiros do PokeIdle na Twitch. Ele mostra o saldo de pontos de cada canal com o preço real dos bônus, pega o baú de +50 por você e junta o chat de todos os canais num só lugar.
+Independent security-maintenance fork of [ViinniSantoos/twitchterino](https://github.com/ViinniSantoos/twitchterino), originally created by VinniiSaantos. The original MIT license, copyright and Git history are preserved.
 
-**Download:** https://viinnisantoos.github.io/twitchterino/
+Twitchterino is an Electron client for Twitch chat and PokeIdle channel-point tracking. It retains the existing interface, channel rewards, background video playback, bonus-chest collection, notifications and one-account session model.
 
-## Recursos
+## Security-maintenance changes
 
-- **Preço real de cada canal:** o app lê a loja de cada streamer (bônus de 1 h, 3 h, 5 h e 10 h) e avisa quando um preço muda.
-- **Foco em bônus:** as lives abertas vão para os canais mais perto do próximo bônus. Canais em que você é sub vêm primeiro.
-- **Baú de +50 automático:** o app clica no baú de bônus quando ele aparece. Dá para desligar.
-- **Bônus ativos com cronômetro:** compras feitas no app entram sozinhas. Um aviso aparece 5 min antes de acabar.
-- **Lista lateral:** foto de cada streamer com um anel de progresso até o próximo bônus, grupos (Fixados, Ao vivo, Offline) e busca (Ctrl+K).
-- **Teste de várias lives:** mede com a sua conta em quantas lives os pontos sobem ao mesmo tempo.
-- **Chat de todos os canais:** emotes, destaque de menção e aviso de sorteio.
-- **Relatório da semana:** salva uma imagem pronta para postar.
-- **Modo antes de dormir:** opcional, abre as lojas uma de cada vez.
-- **Modo leve:** lives ocultas em 160p, sem som e sem anúncios. O app fica na bandeja e pode iniciar com o Windows.
+- Application API queries use the platform session from Electron's main process. They no longer inject query tokens into a navigable page.
+- Credential-bearing requests have fixed destinations, reject redirects, abort on timeout/session replacement and limit response size.
+- Every application IPC command authenticates the exact local UI main frame and validates its arguments before side effects.
+- The preload bridge is unavailable to remote pages and child frames; the privileged UI cannot navigate to remote sites or open remote popups.
+- Automatic update checking, downloading and installation are disabled. The fork metadata points to this repository; there is no signed automatic-update channel yet.
+- Known vulnerable minimatch build-tool versions are replaced with a version-qualified override that preserves unrelated legacy versions.
 
-## O que o app não faz
+The platform's own web pages still handle their normal website login and cookies. These changes do not certify the application or its external services as vulnerability-free.
 
-- Não usa mais de uma conta ao mesmo tempo.
-- Não compra bônus sozinho. A compra é sempre feita por você.
-- Não guarda sua senha. O login é feito na página oficial da Twitch, e a sessão fica só no seu PC.
+## Run and test from source
 
-## Desenvolvimento
+Use Node.js 22.13 or newer (Node.js 24 is used for validation).
 
-```bash
+```sh
 npm ci
+npm test
+npm run test:electron
 npm start
-npm run dist
 ```
 
-- `npm start` roda o app.
-- `npm run dist` gera o instalador e a versão portátil em `dist/`.
-- `npm run dist:linux` (no Linux ou WSL) gera o AppImage e o .deb.
+Electron 45 downloads its binary on first use when it is not already installed. The optional `test:electron` command runs a controlled local transport fixture using fictitious credentials and a temporary browser profile. On Linux only, its headless fixture disables the Chromium sandbox to accommodate restricted test environments; product startup keeps the existing sandbox settings.
 
-As atualizações automáticas chegam pelo GitHub Releases.
+For a local packaging check without publishing:
 
-Projeto independente, sem ligação com a Twitch ou o PokeIdle. Licença MIT.
+```sh
+npm run dist:linux -- --dir --publish never
+# On Windows:
+npm run dist -- --publish never
+```
+
+The packaging configuration includes the main-process security modules. Tests exercise request routing, redirect refusal, timeouts, session invalidation, IPC authentication, argument bounds, preload exposure and updater-disabled startup.
+
+## Distribution and session compatibility
+
+This maintenance change does not publish reviewed installers or releases. Downloads from the original author's project do not contain the fork's changes. Update maintained builds manually from reviewed source until a separate trusted signing/update policy is established.
+
+The existing application ID, profile directories and visible name are retained. Resolve installer coexistence and final distribution identity before installing a fork build alongside the original. Do not commit cookies, tokens, browser profiles or personal session data.
+
+The partner list remains public configuration fetched from the original author's GitHub Pages URL with the existing slug validation. It is separate from application updates.
+
+Live Twitch login, live point accrual and Windows UI behavior require manual validation with the maintained build. Controlled tests with fake sessions do not establish those behaviors.
+
+## Attribution
+
+Original project: [ViinniSantoos/twitchterino](https://github.com/ViinniSantoos/twitchterino). Original author: VinniiSaantos. Maintenance fork: [jggomes11/twitchterino](https://github.com/jggomes11/twitchterino). License: [MIT](LICENSE).

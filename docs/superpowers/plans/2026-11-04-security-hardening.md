@@ -28,33 +28,35 @@
 
 **Files:** Create security/requests.js, security/platform.js, tests/requests.test.cjs and tests/platform.test.cjs. Modify main.js.
 **Interfaces:** createSessionClient({ getSession, getHeaders, resolveUrl, timeoutMs, maxResponseBytes }) returns { request(input, {method,body}), invalidate(), suspend(), resume(), generation }. request returns {status,json}. readCookie(session, origin, name), resolveTwitchUrl(input), resolveKickUrl(input), createPlatformClient(platform, getSession).
-- [ ] Write tests for fixed endpoint resolution, wrong-origin and traversal rejection before cookie reads, correct session/cookie headers, redirect refusal, bounded streaming, safe error messages, cancellation, and session changes during headers/body.
-- [ ] Run node --test tests/requests.test.cjs tests/platform.test.cjs; observe the missing transport fail.
-- [ ] Implement the request modules with a 20-second abort timeout, 2 MiB response cap, credentials include, redirect error and fixed endpoint validation.
-- [ ] Replace gql/kickFetch renderer execution with the platform client, invalidate on platform auth-cookie changes, and suspend/cancel before logout. Gate polling results by session generation.
-- [ ] Run the request tests and an application-level fake-session regression reproducing the previous token-in-page condition. All must pass.
-- [ ] Commit the independently tested request boundary.
+- [x] Write tests for fixed endpoint resolution, wrong-origin and traversal rejection before cookie reads, correct session/cookie headers, redirect refusal, bounded streaming, safe error messages, cancellation, and session changes during headers/body.
+- [x] Run node --test tests/requests.test.cjs tests/platform.test.cjs; observe the missing transport fail.
+- [x] Implement the request modules with a 20-second abort timeout, 2 MiB response cap, credentials include, redirect error and fixed endpoint validation.
+- [x] Replace gql/kickFetch renderer execution with the platform client, invalidate on platform auth-cookie changes, and suspend/cancel before logout. Gate polling results by session generation.
+- [x] Run the request tests and an application-level fake-session regression reproducing the previous token-in-page condition. All must pass.
+- [x] Commit the independently tested request boundary.
 
 ### Task 2: IPC, preload and UI-window boundary
 
 **Files:** Create security/ipc.js, tests/ipc.test.cjs, tests/application.test.cjs. Modify main.js and preload.js.
 **Interfaces:** createIpcRegistrar({ipcMain,getMainWindow,uiDocument,platform,getContext}) returns handleIpc(channel,handler); validateIpcArgs(channel,args,{platform,channels,chatroomIds,viewport}) returns normalized arguments.
-- [ ] Write tests for exact UI document/main-frame authentication, remote windows, subframes, destroyed frames, no side effects on invalid callers, and all registered commands.
-- [ ] Write argument tests: booleans; platform slug syntax/membership; numeric settings; 500-character chat content; CR/LF identifiers; numeric Kick chatroom IDs; report rectangles within viewport; queues of at most 100 unique known channels; valid bonus selections.
-- [ ] Run node --test tests/ipc.test.cjs tests/application.test.cjs and observe the absent protection fail.
-- [ ] Implement one guarded registrar for every handler, sanitized failures and per-command validation. Restrict preload exposure using the exact UI URL passed as a sandbox-safe additional argument. Deny UI navigation and popups, keeping explicit sandbox settings in platform windows.
-- [ ] Run the full node --test suite; valid UI flows and all rejected boundary cases must pass.
-- [ ] Commit the independently tested IPC boundary.
+- [x] Write tests for exact UI document/main-frame authentication, remote windows, subframes, destroyed frames, no side effects on invalid callers, and all registered commands.
+- [x] Write argument tests: booleans; platform slug syntax/membership; numeric settings; 500-character chat content; CR/LF identifiers; numeric Kick chatroom IDs; report rectangles within viewport; queues of at most 100 unique known channels; valid bonus selections.
+- [x] Run node --test tests/ipc.test.cjs tests/application.test.cjs and observe the absent protection fail.
+- [x] Implement one guarded registrar for every handler, sanitized failures and per-command validation. Restrict preload exposure using the exact UI URL passed as a sandbox-safe additional argument. Deny UI navigation and popups, keeping explicit sandbox settings in platform windows.
+- [x] Run the full node --test suite; valid UI flows and all rejected boundary cases must pass.
+- [x] Commit the independently tested IPC boundary.
 
 ### Task 3: Fork update policy, dependencies and release readiness
 
 **Files:** Modify package.json, package-lock.json, README.md, docs/index.html as needed. Add tests/policy.test.cjs, tests/electron-fixture.cjs and scripts/test-electron.cjs.
 **Interfaces:** npm test runs node --test tests/*.test.cjs; npm run test:electron runs the controlled Electron fixture. Packaging includes security/**/*.
-- [ ] Write policy tests for no updater startup path, user-owned package/update metadata, included security modules, preserved app identity and original license.
-- [ ] Run the policy tests and observe the existing upstream updater configuration fail.
-- [ ] Remove the runtime updater import/dependency/startup hook; retain fork publish metadata, disable auto updates and document independent-fork/manual-update status.
-- [ ] Resolve vulnerable minimatch copies with compatible tested build-tool changes or targeted overrides to 11.0.1 or newer; never override unrelated legacy major versions globally.
-- [ ] Run npm audit --json and npm audit --omit=dev --json; require removal of the known advisory and no production regression.
-- [ ] Run npm test, the controlled real-Electron session/redirect/abort fixture where available, and electron-builder --linux --dir --publish never as a packaging smoke check. Report environment limitations precisely.
-- [ ] Commit the policy/dependency changes, request one fresh review of the complete branch, fix important findings with regression tests, then create and attach the fork PR. Do not merge or release.
+- [x] Write policy tests for no updater startup path, user-owned package/update metadata, included security modules, preserved app identity and original license.
+- [x] Run the policy tests and observe the existing upstream updater configuration fail.
+- [x] Remove the runtime updater import/dependency/startup hook; retain fork publish metadata, disable auto updates and document independent-fork/manual-update status.
+- [x] Resolve vulnerable minimatch copies with compatible tested build-tool changes or targeted overrides to 11.0.1 or newer; never override unrelated legacy major versions globally.
+- [x] Run npm audit --json and npm audit --omit=dev --json; require removal of the known advisory and no production regression.
+- [x] Run npm test, the controlled real-Electron session/redirect/abort fixture where available, and electron-builder --linux --dir --publish never as a packaging smoke check. Report environment limitations precisely.
+- [x] Commit the policy/dependency changes, request one fresh review of the complete branch, fix important findings with regression tests, then create and attach the fork PR. Do not merge or release.
 
+
+Local implementation checks passed: 29 Node tests, the controlled Electron transport fixture, zero full/production npm advisories, and Linux directory packaging with security-module ASAR inspection. Final branch review and PR creation are recorded separately after this checkpoint; live-account and Windows UI validation remain unperformed.
