@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { spawn } = require('node:child_process');
+const { isRunning, stop } = require('./profile-process.cjs');
 const pkg = require('../package.json');
 
 assert.equal(process.platform, 'win32', 'Validate portable profile processes on native Windows');
@@ -25,15 +26,6 @@ function launch(profile) {
   return child;
 }
 
-async function stop(child) {
-  if (child.exitCode !== null) return;
-  console.log('Profile fixture: stopping process ' + child.pid);
-  child.kill();
-  const deadline = Date.now() + 5000;
-  while (child.exitCode === null && Date.now() < deadline) await pause(100);
-  assert.notEqual(child.exitCode, null, 'Test process did not stop within five seconds');
-}
-
 (async () => {
   try {
     assert(fs.existsSync(executable), 'Missing actual portable executable');
@@ -47,7 +39,7 @@ async function stop(child) {
     for (;;) {
       for (const profile of profiles) {
         assert(!profile.child.launchError, 'Portable process failed to start');
-        assert.equal(profile.child.exitCode, null, 'A separate profile exited prematurely');
+        assert(isRunning(profile.child), 'A separate profile exited prematurely');
       }
       const ready = profiles.every(profile => {
         try { return JSON.parse(fs.readFileSync(path.join(profile.path, 'config.json'), 'utf8')).seenDefaults.length > 0; }
@@ -58,18 +50,18 @@ async function stop(child) {
       await pause(250);
     }
     await pause(3000);
-    assert(profiles.every(profile => profile.child.exitCode === null), 'Four profiles did not stay open concurrently');
+    assert(profiles.every(profile => isRunning(profile.child)), 'Four profiles did not stay open concurrently');
     console.log('Profile fixture: four first-use profiles loaded and remain open');
     const duplicate = launch(profiles[0].path);
     const duplicateDeadline = Date.now() + 30000;
-    while (duplicate.exitCode === null && !duplicate.launchError && Date.now() < duplicateDeadline) await pause(250);
+    while (isRunning(duplicate) && !duplicate.launchError && Date.now() < duplicateDeadline) await pause(250);
     assert(!duplicate.launchError, 'Duplicate launch failed before testing the lock');
     assert.equal(duplicate.exitCode, 0, 'Opening an existing profile did not exit cleanly');
     console.log('Profile fixture: duplicate profile exited cleanly');
-    assert(profiles.every(profile => profile.child.exitCode === null), 'Duplicate launch stopped an existing profile');
+    assert(profiles.every(profile => isRunning(profile.child)), 'Duplicate launch stopped an existing profile');
     await stop(profiles[0].child);
     await pause(1000);
-    assert(profiles.slice(1).every(profile => profile.child.exitCode === null), 'Closing one profile stopped another');
+    assert(profiles.slice(1).every(profile => isRunning(profile.child)), 'Closing one profile stopped another');
     report.simultaneousProfiles = profiles.length;
     report.firstLaunchCreatedProfiles = true;
     report.portableFormat = 'directory-zip';
@@ -79,7 +71,7 @@ async function stop(child) {
     console.log(JSON.stringify(report, null, 2));
   } catch (error) {
     report.error = error.message;
-    report.diagnostics = children.map(child => ({ pid: child.pid, exitCode: child.exitCode, launchError: child.launchError, output: child.output }));
+    report.diagnostics = children.map(child => ({ pid: child.pid, exitCode: child.exitCode, signalCode: child.signalCode, launchError: child.launchError, output: child.output }));
     console.error(JSON.stringify(report.diagnostics));
     console.error(error.message);
     process.exitCode = 1;
