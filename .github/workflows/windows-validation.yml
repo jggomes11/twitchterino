@@ -9,6 +9,10 @@ on:
         description: Build Windows installer and portable release candidates
         type: boolean
         default: false
+      upload_preview:
+        description: Upload the verified four-profile preview to its existing draft
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -19,6 +23,7 @@ concurrency:
 
 jobs:
   windows:
+    if: ${{ !inputs.upload_preview }}
     name: Native Windows UI and packaging
     runs-on: windows-2022
     timeout-minutes: 25
@@ -111,4 +116,51 @@ jobs:
           retention-days: 3
           include-hidden-files: true
           if-no-files-found: warn
+
+  upload-preview:
+    if: github.event_name == 'workflow_dispatch' && inputs.upload_preview
+    runs-on: windows-2022
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: e06d73989dc900bdef758f65e5c3364b2f3a19aa
+          persist-credentials: false
+      - name: Download the pinned native Windows application
+        run: gh run download 42043222629 --repo jggomes11/twitchterino --name windows-validation-e06d73989dc900bdef758f65e5c3364b2f3a19aa --dir preview-source
+      - name: Verify every application file and generate the reviewed launchers
+        shell: pwsh
+        run: |
+          $PreviewInfo = Get-Content preview-source/build-info.json -Raw | ConvertFrom-Json
+          if ($PreviewInfo.sourceSha -ne 'e06d73989dc900bdef758f65e5c3364b2f3a19aa') { throw 'Unexpected preview source' }
+          foreach ($PreviewFile in $PreviewInfo.files) {
+            $PreviewHash = (Get-FileHash -LiteralPath (Join-Path preview-source/app $PreviewFile.path) -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($PreviewHash -ne $PreviewFile.sha256) { throw 'Application checksum mismatch' }
+          }
+          New-Item -ItemType Directory -Path preview-output/portable -Force | Out-Null
+          Copy-Item -LiteralPath preview-source/app -Destination preview-output/portable/app -Recurse
+          Copy-Item LICENSE preview-output/portable/LICENSE.txt
+          Copy-Item preview-source/build-info.json preview-output/portable/build-info.json
+          @'
+          const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
+          const script=fs.readFileSync('scripts/package-windows-release.cjs','utf8');
+          const start=script.indexOf('for (let profile = 1; profile <= 4; profile++)');
+          const end=script.indexOf('const sourceSha =');
+          if(start<0||end<start)throw Error('Launcher generator changed');
+          vm.runInNewContext(script.slice(start,end),{fs,path,output:'preview-output',pkg:require('./package.json')});
+          '@ | node
+          if ($LASTEXITCODE -ne 0) { throw 'Launcher generation failed' }
+          Compress-Archive -Path preview-output/portable/* -DestinationPath Twitchterino-0.1.3-four-profile-preview.zip
+          $PreviewDigest = (Get-FileHash Twitchterino-0.1.3-four-profile-preview.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$PreviewDigest  Twitchterino-0.1.3-four-profile-preview.zip" | Set-Content -Encoding ascii Twitchterino-four-profile-preview-SHA256.txt
+      - name: Upload only to the existing draft preview
+        run: |
+          $PreviewRelease = gh api repos/jggomes11/twitchterino/releases/435309079 | ConvertFrom-Json
+          if (!$PreviewRelease.draft -or $PreviewRelease.tag_name -ne 'v0.1.3-rc.1') { throw 'Expected existing draft preview' }
+          gh release upload v0.1.3-rc.1 Twitchterino-0.1.3-four-profile-preview.zip Twitchterino-four-profile-preview-SHA256.txt --repo jggomes11/twitchterino --clobber
 
