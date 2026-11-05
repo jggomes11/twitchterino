@@ -7,6 +7,7 @@ if (process.isMainFrame && uiArgument && location.href === uiArgument.slice('--a
     addChannel: (slug) => ipcRenderer.invoke('channels:add', slug),
     removeChannel: (slug) => ipcRenderer.invoke('channels:remove', slug),
     setFarming: (on) => ipcRenderer.invoke('farming:set', on),
+    setWatchAll: (on) => ipcRenderer.invoke('watchAll:set', on),
     setMaxWatchers: (n) => ipcRenderer.invoke('maxWatchers:set', n),
     setRotation: (on) => ipcRenderer.invoke('rotation:set', on),
     setBonusTarget: (kind) => ipcRenderer.invoke('bonusTarget:set', kind),

@@ -108,3 +108,9 @@ test('preload exposes the bridge only in its expected UI main frame', () => {
   }
 });
 
+
+test('all-live mode accepts only a boolean through the guarded UI command', () => {
+  assert.deepEqual(validateIpcArgs('watchAll:set', [true], context), [true]);
+  assert.deepEqual(validateIpcArgs('watchAll:set', [false], context), [false]);
+  for (const value of ['true', 1, null, {}, []]) assert.throws(() => validateIpcArgs('watchAll:set', [value], context), /Invalid IPC/);
+});

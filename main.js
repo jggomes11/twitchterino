@@ -78,6 +78,7 @@ const DEFAULT_CONFIG = {
     'matta', 'rodil', 'biscoitao', 'cogu', 'tftoddy', 'luccatv', 'techzz', 'revolta', 'yetz',
   ],
   farming: true,
+  watchAll: false,
   // A Twitch conta no máximo 2 lives por IP como espectador: mais que isso é testado à parte.
   maxWatchers: 2,
   lowQuality: true,
@@ -1111,14 +1112,14 @@ function reconcileWatchers() {
 
   for (const slug of [...watchers.keys()]) {
     if (isShown(slug)) continue;
-    const idle = loggedIn && !limitTest && config.maxWatchers <= 2 && earningState(slug, now) === 'idle';
+    const idle = !config.watchAll && loggedIn && !limitTest && config.maxWatchers <= 2 && earningState(slug, now) === 'idle';
     const s = status.get(slug);
     if (idle && s) s.cooldownUntil = now + IDLE_COOLDOWN_MS;
     if (idle || turnTime(slug, now) >= RECYCLE_MS) stopWatcher(slug);
   }
 
   const rotatable = () => [...watchers.keys()].filter((slug) => !isShown(slug)).sort((a, b) => turnTime(b, now) - turnTime(a, now));
-  while (watchers.size > config.maxWatchers && rotatable().length) stopWatcher(rotatable()[0]);
+  while (!config.watchAll && watchers.size > config.maxWatchers && rotatable().length) stopWatcher(rotatable()[0]);
 
   const focusInfo = (slug) => {
     const s = status.get(slug) || {};
@@ -1126,7 +1127,11 @@ function reconcileWatchers() {
     return { points: s.points, rewards: s.rewards, cooling, sub: !!s.subscribed && !cooling, bonus: hasBonus(s) };
   };
   const byGoal = (a, b) => compareGoal(focusInfo(a), focusInfo(b));
-  const waiting = config.channels.filter((slug) => !watchers.has(slug) && (status.get(slug) || {}).live && (status.get(slug) || {}).pointsEnabled !== false);
+  const waiting = config.channels.filter((slug) => !watchers.has(slug) && (status.get(slug) || {}).live && (config.watchAll || (status.get(slug) || {}).pointsEnabled !== false));
+  if (config.watchAll) {
+    for (const slug of waiting) startWatcher(slug);
+    return;
+  }
   if (config.rotation) waiting.sort(byGoal);
   while (watchers.size < config.maxWatchers && waiting.length) startWatcher(waiting.shift());
   if (!config.rotation) return;
@@ -1212,7 +1217,7 @@ function snapshot() {
   const now = Date.now();
   const confirmedAccount = loggedIn && verifiedAccountGeneration === apiClient.generation;
   return {
-    farming: config.farming, maxWatchers: config.maxWatchers, lowQuality: config.lowQuality, rotation: config.rotation,
+    farming: config.farming, watchAll: !!config.watchAll, maxWatchers: config.maxWatchers, lowQuality: config.lowQuality, rotation: config.rotation,
     bonusTarget: config.bonusTarget, bonusOptions: bonusOptions(), limitTest: limitTestSnapshot(), limitResult: config.limitResult || null,
     openAtLogin: isOpenAtLogin(), platform: process.platform,
     notifyBonus: config.notifyBonus, notifyChest: config.notifyChest, autoChest: config.autoChest, chestsToday: (config.chestDaily || {})[dayKey(now)] || 0, notifyChat: config.notifyChat, sleepMode: config.sleepMode,
@@ -1385,6 +1390,7 @@ handleIpc('channels:remove', (_e, slug) => {
   return snapshot();
 });
 handleIpc('farming:set', (_e, on) => { setFarming(on); return snapshot(); });
+handleIpc('watchAll:set', (_e, on) => { stopLimitTest(); config.watchAll = on; saveConfig(); reconcileWatchers(); return snapshot(); });
 handleIpc('autostart:set', (_e, on) => { try { setOpenAtLogin(!!on); } catch {} return snapshot(); });
 handleIpc('app:quit', quitApp);
 handleIpc('notifyBonus:set', (_e, on) => { config.notifyBonus = !!on; saveConfig(); return snapshot(); });
@@ -1440,7 +1446,7 @@ handleIpc('bonusTarget:set', (_e, value) => {
   return snapshot();
 });
 handleIpc('limitTest:start', () => {
-  if (!loggedIn) return snapshot();
+  if (!loggedIn || config.watchAll) return snapshot();
   startLimitTest(); reconcileWatchers(); return snapshot();
 });
 handleIpc('limitTest:stop', () => { stopLimitTest(); reconcileWatchers(); return snapshot(); });

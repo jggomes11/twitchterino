@@ -116,6 +116,14 @@ function chestButton(ch) {
   return c;
 }
 
+function pendingPlaybackLabel() {
+  if (state.sessionChecking) return 'VERIFICANDO SESSÃO';
+  if (!state.farming) return 'PAUSADO';
+  if (!state.loggedIn) return 'ENTRAR';
+  if (state.watchAll) return 'INICIANDO';
+  return state.rotation ? 'NA FILA' : 'SEM VAGA';
+}
+
 function channelCard(ch) {
   const favs = new Set(state.favorites || []);
   const queued = ch.live && !ch.watching;
@@ -131,7 +139,7 @@ function channelCard(ch) {
   else if (ch.earning === 'earning') sub.append(el('span', 'earn', '● ganhando'));
   else if (ch.earning === 'warming') sub.append(el('span', 'warm', '◌ aquecendo'));
   else if (ch.earning === 'idle') sub.append(el('span', 'idle', '○ sem pontos'));
-  else if (ch.live) sub.append(el('span', 'viewers', `${fmt(ch.viewers)} assistindo${queued ? ' · na fila' : ''}`));
+  else if (ch.live) sub.append(el('span', 'viewers', `${fmt(ch.viewers)} assistindo${queued ? ' · ' + pendingPlaybackLabel().toLowerCase() : ''}`));
   else sub.append(el('span', 'off', ch.rewardsLoaded && !ch.hasBonus ? 'bônus em breve' : 'offline'));
   info.append(name, sub);
   const side = el('div', 'ch-side');
@@ -290,8 +298,8 @@ function renderLimitTest() {
     return;
   }
   btn.textContent = state.limitResult ? 'Refazer teste de várias lives' : 'Testar várias lives';
-  btn.disabled = !state.loggedIn;
-  btn.title = state.loggedIn ? 'Abre as lives ao vivo com a sua conta (até 10) e mede em quantas os pontos sobem ao mesmo tempo; depois testa números menores (~20 min por etapa) e fica com o que rende mais.' : 'Faça login na Twitch para testar';
+  btn.disabled = !state.loggedIn || !!state.watchAll;
+  btn.title = state.watchAll ? 'Desligue Todas as lives online para testar limites de reprodução.' : state.loggedIn ? 'Abre as lives ao vivo com a sua conta (até 10) e mede em quantas os pontos sobem ao mesmo tempo; depois testa números menores (~20 min por etapa) e fica com o que rende mais.' : 'Faça login na Twitch para testar';
   const r = state.limitResult;
   if (!r) return;
   info.append(el('div', 'limit-now', `Último teste (${new Date(r.at).toLocaleString('pt-BR')}): usando ${r.chosen} lives`));
@@ -327,7 +335,7 @@ function renderPanel() {
       : ch.earning === 'earning' ? el('span', 'pill watching', 'GANHANDO')
       : ch.earning === 'warming' ? el('span', 'pill warming', 'AQUECENDO')
       : ch.earning === 'idle' ? el('span', 'pill stalled', 'SEM PONTOS')
-      : ch.live ? el('span', 'pill queue', state.rotation ? 'NA FILA' : 'SEM VAGA') : el('span', 'pill', 'offline');
+      : ch.live ? el('span', 'pill queue', pendingPlaybackLabel()) : el('span', 'pill', 'offline');
     if (ch.earning === 'warming') st.title = 'A Twitch dá a primeira contagem ~5 min depois que a live abre.';
     if (ch.earning === 'idle') st.title = 'Tocando há mais de 13 min sem o saldo subir.';
     if (ch.live && ch.goalLeft != null && state.rotation) st.title = `${st.title || ''}\nFaltam ${ch.goalLeft} pts para ${ch.goal}`.trim();
@@ -355,7 +363,7 @@ function renderPanel() {
   const chip = (icon, value, label, cls = '') => { const c = el('span', `stat ${cls}`); c.append(el('i', null, icon), el('b', null, value), el('small', null, label)); sum.append(c); };
   chip('🔴', String(live), 'ao vivo');
   if (state.loggedIn) {
-    chip('▶', String(watching), queued ? `assistindo · ${queued} na fila` : 'assistindo', watching ? 'on' : '');
+    chip('▶', String(watching), queued ? `assistindo · ${queued} aguardando` : 'assistindo', watching ? 'on' : '');
     chip('💜', fmt(totalPts), 'pontos');
     chip('📈', `+${fmt(state.today || 0)}`, 'hoje', 'up');
     if (state.chestsToday) chip('🎁', String(state.chestsToday), state.chestsToday === 1 ? 'baú hoje' : 'baús hoje', 'gold');
@@ -416,6 +424,9 @@ function applyState(s) {
   }
   if (!active && state.channels.length) active = state.channels[0].slug;
   $('#farming').checked = state.farming;
+  $('#watch-all').checked = !!state.watchAll;
+  $('#max-watchers').disabled = !!state.watchAll;
+  $('#rotation').disabled = !!state.watchAll;
   $('#low-quality').checked = state.lowQuality;
   $('#rotation').checked = state.rotation;
   renderTargetSelect();
@@ -682,6 +693,7 @@ $('#btn-login').onclick = () => window.tt.showLogin();
 $('#btn-logout').onclick = async () => applyState(await window.tt.logout());
 $('#btn-refresh').onclick = async () => applyState(await window.tt.refresh());
 $('#farming').onchange = async (e) => applyState(await window.tt.setFarming(e.target.checked));
+$('#watch-all').onchange = async (e) => applyState(await window.tt.setWatchAll(e.target.checked));
 $('#btn-limit').onclick = async () => applyState(await (state.limitTest ? window.tt.stopLimitTest() : window.tt.startLimitTest()));
 $('#autostart').onchange = async (e) => applyState(await window.tt.setAutostart(e.target.checked));
 $('#btn-quit').onclick = () => window.tt.quit();

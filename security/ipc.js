@@ -28,7 +28,7 @@ function validateIpcArgs(channel, args, context) {
     return [];
   }
   const value = one(args);
-  if (['farming:set', 'autostart:set', 'notifyBonus:set', 'notifyChest:set', 'autoChest:set', 'notifyChat:set', 'sleepMode:set', 'rotation:set', 'lowQuality:set'].includes(channel)) {
+  if (['farming:set', 'watchAll:set', 'autostart:set', 'notifyBonus:set', 'notifyChest:set', 'autoChest:set', 'notifyChat:set', 'sleepMode:set', 'rotation:set', 'lowQuality:set'].includes(channel)) {
     if (typeof value !== 'boolean') invalid();
     return [value];
   }

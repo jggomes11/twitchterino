@@ -30,9 +30,10 @@
 
   <div id="settings" hidden>
     <h3>Configurações</h3>
+    <label class="toggle"><input type="checkbox" id="watch-all"> <span><b>Todas as lives online</b><small>Com Juntar pontos ligado, inicia os canais da lista e os que entrarem ao vivo. Não precisa abrir cada player.</small></span></label>
     <label class="toggle"><input type="checkbox" id="rotation"> <span><b>Foco em bônus</b><small>As vagas vão para os canais mais perto do próximo bônus. Subs vêm primeiro.</small></span></label>
-    <label class="row" title="A Twitch conta no máximo 2 lives por IP como espectador. Use o teste no painel para ver quantas rendem pontos.">
-      <span><b>Lives ao mesmo tempo</b><small>Padrão: 2. Teste mais no painel de bônus.</small></span><input type="number" id="max-watchers" min="1" max="10"></label>
+    <label class="row" title="Usado quando Todas as lives online estiver desligado.">
+      <span><b>Limite de lives</b><small>Usado quando Todas as lives online estiver desligado.</small></span><input type="number" id="max-watchers" min="1" max="10"></label>
     <label class="toggle"><input type="checkbox" id="low-quality"> <span><b>Modo leve (160p)</b><small>Lives ocultas sem imagem nem qualidade alta: menos memória e internet.</small></span></label>
     <label class="toggle" id="autostart-label"><input type="checkbox" id="autostart"> <span><b>Iniciar com o Windows</b><small>Abre direto na bandeja, perto do relógio.</small></span></label>
     <label class="toggle"><input type="checkbox" id="auto-chest"> <span><b>Pegar baú sozinho 🎁</b><small>Quando o baú de +50 aparece, o app clica nele por você. Não gasta pontos.</small></span></label>
@@ -61,7 +62,7 @@
           <span id="chat-title"></span>
           <span id="chat-actions">
             <button id="btn-fav" class="icon" title="Fixar: o canal fica no topo da lista e você recebe um aviso quando ele entrar ao vivo">☆</button>
-            <button id="btn-show" title="Abre a live com vídeo e som">▶ Abrir live</button>
+            <button id="btn-show" title="Mostra o player com som. Juntar pontos inicia a coleta automaticamente em segundo plano.">▶ Mostrar player</button>
             <button id="btn-remove" class="icon" title="Remover canal">✕</button>
           </span>
         </div>
@@ -93,7 +94,7 @@
         <div id="tools">
           <button id="btn-report" title="Pontos, bônus comprados e tempo com bônus ativo nos últimos 7 dias">📊 Relatório da semana</button>
         </div>
-        <p class="hint">A Twitch dá 10 pontos a cada 5 min por live assistida (sub ganha mais: ×1,2 no nível 1, ×1,4 no 2 e ×2 no 3). O baú de bônus vale +50 quando você clica nele. O preço dos bônus é lido da loja de cada canal. O app usa uma conta por vez; a Twitch conta no máximo 2 lives por IP como espectador.</p>
+        <p class="hint">A Twitch dá 10 pontos a cada 5 min por live assistida (sub ganha mais: ×1,2 no nível 1, ×1,4 no 2 e ×2 no 3). O baú de bônus vale +50 quando você clica nele. O preço dos bônus é lido da loja de cada canal. O app usa uma conta por vez. Selecionar um canal muda o chat; Juntar pontos inicia os players automaticamente. Confira o ganho pelo saldo de cada canal.</p>
       </aside>
     </main>
   </div>

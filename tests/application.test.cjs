@@ -134,6 +134,50 @@ test('ordinary token rotation for the same account keeps its earnings baseline',
 });
 
 if (platform === 'twitch') {
+  test('all-live mode starts every listed online channel without revealing a player', async () => {
+    const app = loadApp();
+    const slugs = app.apiExports.config.channels.slice(0, 3);
+    await app.handlers.get('farming:set')(app.event(), false);
+    setAccountResponses(app, { id: '1', name: 'account_a', points: 100, live: slugs });
+    await app.apiExports.poll();
+    await app.handlers.get('maxWatchers:set')(app.event(), 1);
+    await app.handlers.get('watchAll:set')(app.event(), true);
+    const actual = await app.handlers.get('farming:set')(app.event(), true);
+    assert.deepEqual(actual.channels.filter(channel => channel.watching).map(channel => channel.slug), slugs);
+    assert.equal(actual.watchAll, true);
+    assert.equal(app.state.reloads.length, 0);
+  });
+
+  test('all-live mode follows channels becoming online and offline and can return to a fixed limit', async () => {
+    const app = loadApp();
+    const slugs = app.apiExports.config.channels.slice(0, 3);
+    const account = { id: '1', name: 'account_a', points: 100, live: slugs.slice(0, 2) };
+    setAccountResponses(app, account);
+    await app.handlers.get('watchAll:set')(app.event(), true);
+    await app.apiExports.poll();
+    assert.equal(app.apiExports.snapshot().channels.filter(channel => channel.watching).length, 2);
+    account.live = slugs; await app.apiExports.poll();
+    assert.equal(app.apiExports.snapshot().channels.filter(channel => channel.watching).length, 3);
+    account.live = slugs.slice(1); await app.apiExports.poll();
+    assert.deepEqual(app.apiExports.snapshot().channels.filter(channel => channel.watching).map(channel => channel.slug), slugs.slice(1));
+    await app.handlers.get('maxWatchers:set')(app.event(), 1);
+    const limited = await app.handlers.get('watchAll:set')(app.event(), false);
+    assert.equal(limited.channels.filter(channel => channel.watching).length, 1);
+  });
+
+  test('all-live mode retains online players when a channel has not awarded points recently', async () => {
+    const app = loadApp();
+    const slug = app.apiExports.config.channels[0];
+    setAccountResponses(app, { id: '1', name: 'account_a', points: 100, live: [slug] });
+    await app.handlers.get('watchAll:set')(app.event(), true);
+    await app.apiExports.poll();
+    const player = app.state.windows.at(-1);
+    app.apiExports.status.get(slug).watchingSince = Date.now() - 15 * 60 * 1000;
+    await app.apiExports.poll();
+    assert.equal(player.isDestroyed(), false);
+    assert.equal(app.apiExports.snapshot().channels[0].watching, true);
+  });
+
   test('reasserting the selected verified cookie never exposes a signed-out state or closes an unchanged-session store', async () => {
     const app = loadApp();
     app.apiExports.setupSession();
