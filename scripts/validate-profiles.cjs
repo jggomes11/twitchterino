@@ -9,7 +9,8 @@ const pkg = require('../package.json');
 
 assert.equal(process.platform, 'win32', 'Validate portable profile processes on native Windows');
 const root = path.resolve(__dirname, '..');
-const executable = path.join(root, 'release-output', 'portable', 'app', 'Twitchterino.exe');
+const executable = path.resolve(process.argv[2] || path.join(root, 'release-output', 'portable', 'app', 'Twitchterino.exe'));
+const reportPath = path.resolve(process.argv[3] || path.join(root, 'release-output', 'profile-validation.json'));
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'twitchterino-profile-validation-'));
 const children = [];
 const report = { version: pkg.version, scope: 'four empty portable profiles; no account or point awards', passed: false };
@@ -88,7 +89,8 @@ async function stop(child) {
       catch (error) { console.error(error.message); process.exitCode = 1; }
       child.stdout.destroy(); child.stderr.destroy(); child.unref();
     }
-    fs.writeFileSync(path.join(root, 'release-output', 'profile-validation.json'), JSON.stringify(report, null, 2) + '\n');
+    fs.mkdirSync(path.dirname(reportPath), { recursive: true });
+    fs.writeFileSync(reportPath, JSON.stringify(report, null, 2) + '\n');
     try { fs.rmSync(temporary, { recursive: true, force: true }); }
     catch { console.log('Empty temporary profiles remain in the disposable runner.'); }
     console.log('Profile fixture: cleanup complete');
