@@ -34,7 +34,15 @@ function launch(profile) {
     for (let index = 1; index <= 4; index++) {
       const profile = path.join(temporary, 'Conta-' + index);
       assert(!fs.existsSync(profile), 'First launch must create its own profile directory');
-      profiles.push({ path: profile, child: launch(profile) });
+      const child = launch(profile);
+      profiles.push({ path: profile, child });
+      const startupDeadline = Date.now() + 30000;
+      while (!child.output.includes('profile initialization complete')) {
+        assert(!child.launchError && isRunning(child), 'A profile exited during initialization');
+        assert(Date.now() < startupDeadline, 'A profile did not complete initialization');
+        await pause(250);
+      }
+      console.log('Profile fixture: initialization complete for process ' + child.pid);
     }
     const deadline = Date.now() + 60000;
     for (;;) {

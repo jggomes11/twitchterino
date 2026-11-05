@@ -1567,8 +1567,11 @@ if (!ownsProfile) {
   app.setAppUserModelId('com.vinniisaantos.twitchterino');
 
   app.whenReady().then(() => {
+    step('profile ready callback', process.pid);
     loadConfig();
+    step('profile config loaded', process.pid);
     setupSession();
+    step('profile session initialized', process.pid);
     mainWin = new BrowserWindow({
       width: 1380, height: 840, minWidth: 820, minHeight: 560, backgroundColor: '#0b0716', title: 'Twitchterino',
       show: !process.argv.includes('--hidden'),
@@ -1576,6 +1579,7 @@ if (!ownsProfile) {
       webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, sandbox: true, nodeIntegration: false, additionalArguments: ['--app-ui-url=' + UI_DOCUMENT] },
     });
     mainWin.setMenuBarVisibility(false);
+    step('profile window created', process.pid);
     mainWin.loadFile(path.join(__dirname, 'renderer', 'index.html'));
     mainWin.on('close', (e) => {
       if (app.isQuitting) return;
@@ -1603,6 +1607,7 @@ if (!ownsProfile) {
     setInterval(() => { checkBonusEnding(); updateTray(); }, 30 * 1000);
     setTimeout(syncPartners, 30 * 1000);
     setInterval(syncPartners, 6 * 60 * 60 * 1000);
+    step('profile initialization complete', process.pid);
   });
 }
 
