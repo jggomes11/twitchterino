@@ -8,6 +8,7 @@ const {
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const { createHash } = require('node:crypto');
 const { createPlatformClient } = require('./security/platform');
 const { readCookie } = require('./security/requests');
 const { selectReportAccount } = require('./security/accounts');
@@ -34,6 +35,10 @@ const PARTITION = 'persist:twitch';
 const apiClient = createPlatformClient('twitch', () => session.fromPartition(PARTITION));
 let sessionTransition = false;
 let verifiedAccountGeneration = -1;
+let verifiedTokenDigest = null;
+let sessionChecking = false;
+let cookieCheckPending = false;
+const tokenDigest = token => token ? createHash('sha256').update(token).digest('hex') : null;
 function assertSession(generation) {
   if (sessionTransition || apiClient.generation !== generation) throw new Error('Session changed');
 }
@@ -141,31 +146,64 @@ function setupSession() {
   ses.webRequest.onBeforeRequest({ urls: ['*://*/*'] }, (details, cb) => {
     cb({ cancel: BLOCKED_HOSTS.some((h) => details.url.includes(h)) || (HIDDEN_SKIP.has(details.resourceType) && isHiddenWatcher(details.webContents)) });
   });
-  // Login feito: a janela de login some sozinha e o app já começa.
-  ses.cookies.on('changed', (_e, cookie, cause, removed) => {
-    if (cookie.name !== 'auth-token' || !['twitch.tv', 'www.twitch.tv'].includes(cookie.domain.replace(/^\./, ''))) return;
+  // Cookie events describe storage operations, not whether an account signed out.
+  // Check the cookie actually selected by our API before changing the displayed session.
+  ses.cookies.on('changed', (_e, changedCookie, cause, removed) => {
+    if (changedCookie.name !== 'auth-token' || !['twitch.tv', 'www.twitch.tv'].includes(changedCookie.domain.replace(/^\./, ''))) return;
     clearTimeout(authRefreshTimer);
     authRefreshTimer = null;
     apiClient.invalidate();
     verifiedAccountGeneration = -1;
-    username = null;
     loggedIn = false;
-    cancelAccountWindows();
+    sessionChecking = true;
+    cookieCheckPending = true;
     if (ircSend) { const socket = ircSend; ircSend = null; try { socket.close(); } catch {} }
-    if (removed) {
-      // Chromium removes the previous cookie before inserting its replacement.
-      // Invalidate old work, but keep players and baselines across that transient removal.
-      if (cause !== 'overwrite') resetAccountRuntime();
+    if (removed && cause !== 'overwrite') {
+      verifiedTokenDigest = null;
+      username = null;
+      sessionChecking = false;
+      cookieCheckPending = false;
+      resetAccountRuntime();
+      send('status', snapshot());
       return;
     }
     const generation = apiClient.generation;
     authRefreshTimer = setTimeout(async () => {
       authRefreshTimer = null;
-      if (sessionTransition || generation !== apiClient.generation || !apiWin || apiWin.isDestroyed()) return;
-      if (apiWin.isVisible()) { apiWin.hide(); await loadApi(LIGHT_URL); }
-      if (sessionTransition || generation !== apiClient.generation) return;
-      await poll();
-    }, 2500);
+      try {
+        const token = await authToken();
+        if (sessionTransition || generation !== apiClient.generation || !apiWin || apiWin.isDestroyed()) return;
+        cookieCheckPending = false;
+        if (!token) {
+          verifiedTokenDigest = null;
+          username = null;
+          loggedIn = false;
+          sessionChecking = false;
+          resetAccountRuntime();
+          send('status', snapshot());
+          return;
+        }
+        if (verifiedTokenDigest && tokenDigest(token) === verifiedTokenDigest && username) {
+          verifiedAccountGeneration = generation;
+          loggedIn = true;
+          sessionChecking = false;
+        } else {
+          cancelAccountWindows();
+        }
+        if (apiWin.isVisible()) { apiWin.hide(); void loadApi(LIGHT_URL); }
+        send('status', snapshot());
+        if (loggedIn) reconcileWatchers();
+        await poll();
+      } catch {
+        if (generation !== apiClient.generation || sessionTransition) return;
+        cookieCheckPending = false;
+        sessionChecking = false;
+        loggedIn = false;
+        cancelAccountWindows();
+        reconcileWatchers();
+        send('status', snapshot());
+      }
+    }, 100);
   });
 }
 
@@ -559,6 +597,7 @@ async function refreshAll() {
       } else {
         username = null;
         verifiedAccountGeneration = -1;
+        verifiedTokenDigest = null;
       }
     }
     part.forEach((slug, j) => {
@@ -1060,6 +1099,7 @@ const isShown = (slug) => { const w = watchers.get(slug); return !!w && !w.isDes
 const RECYCLE_MS = 6 * 60 * 60 * 1000;
 
 function reconcileWatchers() {
+  if (config.farming && sessionChecking && !process.env.TWITCHTERINO_ALLOW_ANON) return;
   const now = Date.now();
   const canFarm = config.farming && (loggedIn || process.env.TWITCHTERINO_ALLOW_ANON);
   for (const slug of [...watchers.keys()]) {
@@ -1170,27 +1210,28 @@ function limitTestSnapshot() {
 
 function snapshot() {
   const now = Date.now();
+  const confirmedAccount = loggedIn && verifiedAccountGeneration === apiClient.generation;
   return {
     farming: config.farming, maxWatchers: config.maxWatchers, lowQuality: config.lowQuality, rotation: config.rotation,
     bonusTarget: config.bonusTarget, bonusOptions: bonusOptions(), limitTest: limitTestSnapshot(), limitResult: config.limitResult || null,
     openAtLogin: isOpenAtLogin(), platform: process.platform,
     notifyBonus: config.notifyBonus, notifyChest: config.notifyChest, autoChest: config.autoChest, chestsToday: (config.chestDaily || {})[dayKey(now)] || 0, notifyChat: config.notifyChat, sleepMode: config.sleepMode,
-    favorites: config.favorites, username, version: app.getVersion(),
+    favorites: config.favorites, username: confirmedAccount ? username : null, sessionChecking, version: app.getVersion(),
     intro: config.lastSeenVersion === app.getVersion() ? null : (firstRun ? 'welcome' : 'news'),
-    bonuses: activeBonuses(now),
-    today: config.daily[dayKey(now)] || 0,
-    purchases: [...config.purchases].sort((a, b) => b.t - a.t).slice(0, 6),
+    bonuses: confirmedAccount ? activeBonuses(now) : [],
+    today: confirmedAccount ? config.daily[dayKey(now)] || 0 : 0,
+    purchases: confirmedAccount ? [...config.purchases].sort((a, b) => b.t - a.t).slice(0, 6) : [],
     storeSequence: storeSequence ? { done: storeSequence.done, total: storeSequence.total } : null,
     channels: config.channels.map((slug) => {
       const s = status.get(slug) || {};
-      const known = s.points != null;
+      const known = confirmedAccount && s.points != null;
       const rank = known ? goalRank(s) : null;
       return {
         slug, displayName: s.displayName || slug, avatar: s.avatar || null, live: !!s.live, viewers: s.viewers || 0, title: s.title || '',
-        chatroomId: s.displayName ? slug : null, points: s.points ?? null,
+        chatroomId: s.displayName ? slug : null, points: confirmedAccount ? s.points ?? null : null,
         watching: watchers.has(slug), ageGate: !!s.ageGate, earning: earningState(slug, now),
         following: s.following ?? null, subscribed: !!s.subscribed, multiplier: s.multiplier || 1,
-        gained: s.gainedTotal || 0, goal: rank ? rank.goal : null, goalLeft: rank ? rank.left : null,
+        gained: confirmedAccount ? s.gainedTotal || 0 : 0, goal: rank ? rank.goal : null, goalLeft: rank ? rank.left : null,
         costs: costsOf(s), targetCost: targetCost(s), hasBonus: hasBonus(s), rewardsLoaded: !!s.rewards, chest: !!s.claim, chestState: chestBusy === slug ? 'claiming' : chestQueue.includes(slug) ? 'queued' : null,
         rewards: (s.rewards || []).filter((r) => r.available).map((r) => ({ kind: r.kind, hours: r.hours, cost: r.cost })),
         priceChange: s.priceChange && now - s.priceChange.at < DAY_MS ? s.priceChange.text : null,
@@ -1206,24 +1247,31 @@ function snapshot() {
 const POLL_STUCK_MS = 5 * 60 * 1000;
 let polling = false;
 let pollStartedAt = 0;
+let pollingGeneration = -1;
+let pollSequence = 0;
 let loggedIn = false;
 const step = (...a) => { if (process.env.TWITCHTERINO_DEBUG) console.log('STEP', new Date().toISOString().slice(11, 19), ...a); };
 async function poll() {
-  if (sessionTransition) return;
+  if (sessionTransition || cookieCheckPending) return;
   const generation = apiClient.generation;
-  if (polling && Date.now() - pollStartedAt < POLL_STUCK_MS) return;
+  if (polling && pollingGeneration === generation && Date.now() - pollStartedAt < POLL_STUCK_MS) return;
   const startedAt = Date.now();
+  const cycle = ++pollSequence;
   polling = true;
+  pollingGeneration = generation;
   pollStartedAt = startedAt;
   try {
     const token = await authToken();
     assertSession(generation);
-    loggedIn = !!token;
+    if (token && verifiedAccountGeneration !== generation) sessionChecking = true;
     step('consulta');
     await refreshAll();
     assertSession(generation);
     step('consulta ok', [...status.values()].filter((s) => s.live).length, 'ao vivo');
-    if (!loggedIn) username = null;
+    loggedIn = !!token && verifiedAccountGeneration === generation;
+    sessionChecking = false;
+    if (loggedIn) verifiedTokenDigest = tokenDigest(token);
+    if (!token) { username = null; verifiedTokenDigest = null; }
     if (configDirty) { configDirty = false; saveConfig(); }
     if (config.channels.length && config.channels.every((slug) => (status.get(slug) || {}).error) && !apiWin.isVisible()) loadApi(LIGHT_URL);
     advanceLimitTest();
@@ -1245,7 +1293,12 @@ async function poll() {
   } catch (e) {
     if (process.env.TWITCHTERINO_DEBUG) console.log("POLL ERROR", e && e.stack);
     // Twitch ou internet fora do ar: a próxima rodada tenta de novo.
-  } finally { if (pollStartedAt === startedAt) polling = false; }
+    if (generation === apiClient.generation && !cookieCheckPending && verifiedAccountGeneration !== generation) {
+      sessionChecking = false;
+      loggedIn = false;
+      send('status', snapshot());
+    }
+  } finally { if (pollSequence === cycle) polling = false; }
 }
 
 // ---------- Modo 24/7 ----------
@@ -1409,6 +1462,11 @@ handleIpc('logout', async () => {
   });
   if (response !== 0) return snapshot();
   sessionTransition = true;
+  clearTimeout(authRefreshTimer);
+  authRefreshTimer = null;
+  verifiedTokenDigest = null;
+  sessionChecking = false;
+  cookieCheckPending = false;
   apiClient.suspend();
   try {
     apiWin.webContents.stop();
@@ -1442,7 +1500,6 @@ handleIpc('channel:show', (_e, slug) => {
   win.setFocusable(true);
   win.setSize(960, 600); win.center();
   win.show(); win.focus();
-  win.webContents.reload();
   const s = status.get(slug);
   if (s) s.ageGate = false;
   send('status', snapshot());

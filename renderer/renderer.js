@@ -365,8 +365,8 @@ function renderPanel() {
 // Sem login: um cartão explica o que fazer, no lugar do chat vazio.
 function renderWelcome() {
   const card = $('#welcome-card');
-  card.hidden = !!state.loggedIn;
-  if (state.loggedIn || card.childElementCount) return;
+  card.hidden = !!state.loggedIn || !!state.sessionChecking;
+  if (state.loggedIn || state.sessionChecking || card.childElementCount) return;
   card.append(el('div', 'wc-icon', '💜'), el('h3', null, 'Entre com a sua conta da Twitch'),
     el('p', null, 'O Twitchterino deixa as lives do PokeIdle tocando em segundo plano, pega o baú de +50 por você, mostra o saldo de cada canal com o preço real dos bônus e avisa quando dá para comprar.'),
     button('Entrar com a Twitch', 'primary', () => window.tt.showLogin()),
@@ -433,8 +433,9 @@ function applyState(s) {
   if (state.intro && !introShown) { introShown = true; showIntro(state.intro); }
   if (!$('#modal').hidden && modalKind === 'sleep') renderSleepList();
   $('#memory').textContent = state.memoryMB ? `${state.memoryMB} MB` : '';
-  $('#btn-login').textContent = state.loggedIn ? `✓ ${state.username || 'Conectado'}` : 'Entrar com a Twitch';
-  $('#btn-login').title = state.loggedIn ? 'Conta conectada. Para sair, abra as configurações (⚙).' : 'Abre a Twitch para você fazer login (uma vez só)';
+  $('#btn-login').disabled = !!state.sessionChecking;
+  $('#btn-login').textContent = state.sessionChecking ? 'Verificando sessão…' : state.loggedIn ? `✓ ${state.username || 'Conectado'}` : 'Entrar com a Twitch';
+  $('#btn-login').title = state.sessionChecking ? 'Confirmando a sessão salva neste computador.' : state.loggedIn ? 'Conta conectada. Para sair, abra as configurações (⚙).' : 'Abre a Twitch para você fazer login (uma vez só)';
   $('#btn-login').classList.toggle('ok', !!state.loggedIn);
   $('#btn-logout').hidden = !state.loggedIn;
   if (document.activeElement !== $('#max-watchers')) $('#max-watchers').value = state.maxWatchers;

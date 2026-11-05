@@ -85,12 +85,20 @@ test('logout cancels a store queue before asynchronous window close events', asy
 });
 
 function setAccountResponses(app, account) {
-  app.session.fetch = async (url) => {
+  if (platform === 'twitch') app.session.cookies.get = async ({ name }) => {
+    if (name === 'auth-token') return account.token === '' ? [] : [{ value: account.token || 'FAKE_TOKEN_' + account.id }];
+    return [];
+  };
+  app.session.fetch = async (url, init) => {
     if (platform === 'twitch') {
-      const user = { id: 'channel-id', displayName: 'Channel', stream: null,
-        channel: { self: { communityPoints: { balance: account.points } }, communityPointsSettings: { isEnabled: true, customRewards: [] } } };
       const data = { currentUser: { id: account.id, login: account.name, displayName: account.name } };
-      for (let i = 0; i < 10; i++) data['c' + i] = user;
+      const query = JSON.parse(init.body).query;
+      for (const match of query.matchAll(/(c[0-9]+): user\(login: ("[^"\n]+")\)/g)) {
+        const slug = JSON.parse(match[2]);
+        data[match[1]] = { id: 'channel-' + slug, login: slug, displayName: slug,
+          stream: (account.live || []).includes(slug) ? { id: 'stream-' + slug, viewersCount: 10, title: 'Fixture live' } : null,
+          channel: { self: { communityPoints: { balance: account.points } }, communityPointsSettings: { isEnabled: true, customRewards: [] } } };
+      }
       return new Response(JSON.stringify({ data }));
     }
     if (/\/api\/v[12]\/user$/.test(url)) return new Response(JSON.stringify({ id: account.id, username: account.name }));
@@ -108,7 +116,7 @@ test('a replacement account starts with its own balance baseline', async () => {
   await app.apiExports.poll();
   account.id = '2'; account.name = 'account_b'; account.points = 200;
   app.session.cookies.emit('changed', {}, { name: platform === 'twitch' ? 'auth-token' : 'session_token', domain: platform === 'twitch' ? '.twitch.tv' : '.kick.com' }, 'explicit', false);
-  await app.apiExports.poll();
+  if (platform === 'twitch') await app.fireTimers(100); else await app.apiExports.poll();
   assert.equal(Object.values(app.apiExports.config.daily).reduce((sum, value) => sum + value, 0), 0);
   assert.equal(app.apiExports.snapshot().channels.reduce((sum, channel) => sum + channel.gained, 0), 0);
 });
@@ -119,13 +127,96 @@ test('ordinary token rotation for the same account keeps its earnings baseline',
   const account = { id: '1', name: 'account_a', points: 100 };
   setAccountResponses(app, account);
   await app.apiExports.poll();
-  account.points = 110;
+  account.points = 110; account.token = 'FAKE_ROTATED_TOKEN';
   app.session.cookies.emit('changed', {}, { name: platform === 'twitch' ? 'auth-token' : 'session_token', domain: platform === 'twitch' ? '.twitch.tv' : '.kick.com' }, 'explicit', false);
-  await app.apiExports.poll();
+  if (platform === 'twitch') await app.fireTimers(100); else await app.apiExports.poll();
   assert.equal(Object.values(app.apiExports.config.daily).reduce((sum, value) => sum + value, 0), 170);
 });
 
 if (platform === 'twitch') {
+  test('reasserting the selected verified cookie never exposes a signed-out state or closes an unchanged-session store', async () => {
+    const app = loadApp();
+    app.apiExports.setupSession();
+    const account = { id: '1', name: 'account_a', points: 100 };
+    setAccountResponses(app, account);
+    await app.apiExports.poll();
+    const slug = app.apiExports.config.channels[0];
+    await app.handlers.get('store:open')(app.event(), slug);
+    const store = app.state.windows.at(-1);
+    app.session.cookies.emit('changed', {}, { name: 'auth-token', domain: '.twitch.tv' }, 'overwrite', true);
+    let during = app.apiExports.snapshot();
+    assert(during.loggedIn || during.sessionChecking, 'an overwrite is checking or connected, never signed out');
+    app.session.cookies.emit('changed', {}, { name: 'auth-token', domain: '.twitch.tv' }, 'inserted-no-change-overwrite', false);
+    await app.fireTimers(100);
+    const after = app.apiExports.snapshot();
+    assert.equal(after.loggedIn, true);
+    assert.equal(after.username, 'account_a');
+    assert.equal(store.isDestroyed(), false);
+  });
+
+  test('cookie events for an unselected path use the actual selected token', async () => {
+    const app = loadApp(); app.apiExports.setupSession();
+    setAccountResponses(app, { id: '1', name: 'account_a', points: 100 });
+    await app.apiExports.poll();
+    app.session.cookies.emit('changed', {}, { name: 'auth-token', domain: '.twitch.tv', path: '/other', value: 'FAKE_OTHER_SCOPED_COOKIE' }, 'inserted', false);
+    await app.fireTimers(100);
+    assert.equal(app.apiExports.snapshot().username, 'account_a');
+    assert.equal(app.apiExports.snapshot().loggedIn, true);
+  });
+
+  test('current-session verification is not dropped behind a previous-generation player check', async () => {
+    const app = loadApp(); app.apiExports.setupSession();
+    const slug = app.apiExports.config.channels[0];
+    const account = { id: '1', name: 'account_a', points: 100, live: [slug] };
+    setAccountResponses(app, account); await app.apiExports.poll();
+    const player = app.state.windows.at(-1);
+    let release, checks = 0;
+    player.webContents.executeJavaScript = async () => {
+      if (checks++ === 0) await new Promise(resolve => { release = resolve; });
+      return { gate: false, video: null };
+    };
+    const oldPoll = app.apiExports.poll();
+    while (!release) await new Promise(resolve => setImmediate(resolve));
+    account.id = '2'; account.name = 'account_b'; account.points = 200; account.live = [];
+    app.session.cookies.emit('changed', {}, { name: 'auth-token', domain: '.twitch.tv' }, 'inserted', false);
+    await app.fireTimers(100);
+    const beforeOldFinishes = app.apiExports.snapshot();
+    release(); await oldPoll;
+    assert.equal(beforeOldFinishes.username, 'account_b');
+    assert.equal(app.apiExports.snapshot().username, 'account_b');
+    assert.equal(app.apiExports.snapshot().today, 0);
+  });
+
+  test('logout invalidates a selected-cookie check that completes later', async () => {
+    const app = loadApp(); app.apiExports.setupSession();
+    setAccountResponses(app, { id: '1', name: 'account_a', points: 100 });
+    await app.apiExports.poll();
+    let release;
+    app.session.cookies.get = async ({ name }) => name === 'auth-token' ? new Promise(resolve => { release = resolve; }) : [];
+    app.session.cookies.emit('changed', {}, { name: 'auth-token', domain: '.twitch.tv' }, 'inserted', false);
+    const checking = app.fireTimers(100);
+    while (!release) await new Promise(resolve => setImmediate(resolve));
+    await app.handlers.get('logout')(app.event());
+    release([{ value: 'FAKE_TOKEN_1' }]); await checking;
+    assert.equal(app.apiExports.snapshot().loggedIn, false);
+    assert.equal(app.apiExports.snapshot().sessionChecking, false);
+    assert.equal(app.apiExports.status.size, 0);
+  });
+
+  test('showing an already running player does not reload or replace it', async () => {
+    const app = loadApp();
+    const slug = app.apiExports.config.channels[0];
+    const account = { id: '1', name: 'account_a', points: 100, live: [slug] };
+    setAccountResponses(app, account);
+    await app.apiExports.poll();
+    const player = app.state.windows.at(-1);
+    const count = app.state.windows.length;
+    await app.handlers.get('channel:show')(app.event(), slug);
+    assert.equal(app.state.windows.length, count);
+    assert.equal(player.isDestroyed(), false);
+    assert.equal(app.state.reloads.includes(player.webContents.id), false);
+  });
+
   test('overwriting an auth cookie keeps live players and their verified account baseline', async () => {
     const app = loadApp();
     app.apiExports.setupSession();
@@ -141,23 +232,24 @@ if (platform === 'twitch') {
     const store = app.state.windows.at(-1);
     app.session.cookies.emit('changed', {}, { name: 'auth-token', domain: '.twitch.tv' }, 'overwrite', true);
     assert.equal(player.isDestroyed(), false, 'replacement is not a logout');
-    assert.equal(store.isDestroyed(), true, 'account-specific windows must close during revalidation');
-    assert.equal(app.apiExports.snapshot().storeSequence, null);
+    assert.equal(store.isDestroyed(), false, 'an unchanged selected cookie preserves the same-account store');
     assert.equal(app.apiExports.snapshot().channels[0].live, true);
     app.session.cookies.emit('changed', {}, { name: 'auth-token', domain: '.twitch.tv' }, 'inserted-no-change-overwrite', false);
     account.points = 110;
-    await app.apiExports.poll();
+    await app.fireTimers(100);
     assert.equal(app.apiExports.snapshot().today, 170, 'the same account keeps its pre-refresh baseline');
   });
 
   test('an auth-cookie insertion revalidates the account while the login window is hidden', async () => {
     const app = loadApp();
     app.apiExports.setupSession();
-    setAccountResponses(app, { id: '1', name: 'account_a', points: 100 });
+    const account = { id: '1', name: 'account_a', points: 100 };
+    setAccountResponses(app, account);
     await app.apiExports.poll();
+    account.token = 'FAKE_NEW_SAME_ACCOUNT_TOKEN';
     app.session.cookies.emit('changed', {}, { name: 'auth-token', domain: '.twitch.tv' }, 'overwrite', true);
     app.session.cookies.emit('changed', {}, { name: 'auth-token', domain: '.twitch.tv' }, 'inserted', false);
-    await app.fireTimers(2500);
+    await app.fireTimers(100);
     const actual = app.apiExports.snapshot();
     assert.equal(actual.username, 'account_a');
     assert.equal(actual.loggedIn, true);
@@ -178,7 +270,7 @@ if (platform === 'twitch') {
     assert.equal(app.apiExports.snapshot().loggedIn, false);
     let requests = 0;
     app.session.fetch = async () => { requests++; return new Response('{}'); };
-    await app.fireTimers(2500);
+    await app.fireTimers(100);
     assert.equal(requests, 0, 'removal must cancel scheduled authenticated work');
     assert.equal(app.apiExports.snapshot().loggedIn, false);
   });
@@ -215,7 +307,7 @@ if (platform === 'twitch') {
     assert.equal(player.isDestroyed(), false);
     await redeem();
     assert.equal(app.apiExports.config.purchases.length, 0, 'unverified new-session work must not enter the previous account report');
-    await app.fireTimers(2500);
+    await app.fireTimers(100);
     assert.equal(app.apiExports.config.reportAccount, 'id:2');
     assert.equal(app.apiExports.config.accountReports.find(report => report.account === 'id:1').purchases.length, 0);
     await app.handlers.get('store:open')(app.event(), slug);

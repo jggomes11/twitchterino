@@ -8,7 +8,7 @@ const { createRequire } = require('node:module');
 
 function loadApp({ packaged = false, platform = 'win32', configSeed = null } = {}) {
   const root = path.resolve(__dirname, '../..');
-  const state = { scripts: [], requests: [], writes: [], quit: 0, updates: 0, windows: [], ready: [], dialogResponse: 0, sockets: [], timers: [] };
+  const state = { scripts: [], requests: [], writes: [], quit: 0, updates: 0, windows: [], ready: [], dialogResponse: 0, sockets: [], timers: [], reloads: [] };
   const cookies = new EventEmitter();
   cookies.get = async ({ name }) => [{ value: name === 'auth-token' || name === 'session_token' ? 'FAKE_ACCOUNT_TOKEN' : 'FAKE_OTHER_COOKIE' }];
   const session = {
@@ -30,7 +30,7 @@ function loadApp({ packaged = false, platform = 'win32', configSeed = null } = {
       wc.getURL = () => wc.mainFrame.url;
       wc.send = () => {};
       wc.stop = () => {};
-      wc.reload = () => {};
+      wc.reload = () => { state.reloads.push(wc.id); };
       wc.debugger = { isAttached: () => false, attach() {}, on() {}, sendCommand: async () => ({}) };
       wc.executeJavaScript = async code => { state.scripts.push(code); return { status: 200, text: '{"data":{"currentUser":{"login":"page"}}}' }; };
       wc.capturePage = async () => ({ toPNG: () => Buffer.from('png') });
