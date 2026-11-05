@@ -156,6 +156,7 @@ async function freePort() {
         slug: channel.slug, live: channel.live, rewardsLoaded: channel.rewardsLoaded, error: channel.error,
       }));
       await screenshot(main, 'public-channels.png');
+      assert(report.publicChannels.some(channel => channel.rewardsLoaded && !channel.error), 'No public channel query succeeded');
     }
 
     await evaluate(main, 'document.querySelector("#btn-settings")?.click()');

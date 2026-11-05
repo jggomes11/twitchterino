@@ -30,7 +30,9 @@ function createPlatformClient(platform, getSession) {
         return {
           'Client-Id': 'kimne78kx3ncx6brgo4mv6wki5h1ko',
           'Content-Type': 'text/plain;charset=UTF-8',
-          Origin: TWITCH, Referer: TWITCH + '/',
+          // A renderer Origin enables credentialed CORS; GQL allows wildcard origins.
+          // Main-process requests keep session cookies without posing as a renderer.
+          Referer: TWITCH + '/',
           ...(token ? { Authorization: 'OAuth ' + token } : {}),
           ...(device ? { 'X-Device-Id': device } : {}),
         };

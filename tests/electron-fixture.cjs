@@ -16,6 +16,7 @@ app.whenReady().then(async () => {
       if (req.url === '/leak') { leaked++; return res.end('{}'); }
       if (req.url === '/slow') return;
       observed = { cookie: req.headers.cookie, authorization: req.headers.authorization };
+      res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Content-Type', 'application/json'); res.end('{"points":42}');
     });
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -37,6 +38,27 @@ app.whenReady().then(async () => {
     const pending = client.request('/slow');
     client.invalidate();
     await assert.rejects(pending, /Session changed/);
+    // Catch the production regression: renderer Origin plus credential inclusion
+    // makes Chromium reject a wildcard-CORS API, even from a main-process fetch.
+    const { createPlatformClient } = require('../security/platform');
+    const twitch = createPlatformClient('twitch', () => ({
+      cookies: { get: async ({ url, name }) => {
+        assert.equal(url, 'https://www.twitch.tv');
+        return name === 'auth-token' ? [{ value: await readCookie(ses, origin, 'fixture_token') }] : [];
+      } },
+      fetch: (url, init) => {
+        assert.equal(url, 'https://gql.twitch.tv/gql');
+        // The fixture redirects the destination to local HTTP, so omit only the
+        // HTTPS referrer that Chromium correctly rejects on that downgrade.
+        const headers = { ...init.headers }; delete headers.Referer;
+        return ses.fetch(origin + '/data', { ...init, headers });
+      },
+    }));
+    assert.deepEqual(await twitch.request('/gql', { method: 'POST', body: { query: '{user(login:"fixture"){id}}' } }),
+      { status: 200, json: { points: 42 } });
+    assert.match(observed.cookie, /fixture_token=FAKE_RUNTIME_TOKEN/);
+    assert.equal(observed.authorization, 'OAuth FAKE_RUNTIME_TOKEN');
+    console.log('Twitch main-process transport accepts wildcard-CORS responses with session cookies and OAuth.');
     await ses.clearStorageData();
     console.log('Electron transport fixture: session cookies, fixed destination, redirect refusal, timeout and invalidation passed.');
     server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
