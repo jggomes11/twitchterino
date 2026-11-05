@@ -36,15 +36,18 @@ test('valid UI callers retain the application state contract and boolean setting
 });
 
 test('platform auth-cookie replacement invalidates outstanding query work', async () => {
-  const app = loadApp();
-  app.apiExports.setupSession();
-  let release;
-  app.session.fetch = async () => { await new Promise(resolve => { release = resolve; }); return new Response('{"old":true}'); };
-  const pending = platform === 'twitch' ? app.apiExports.query('{currentUser{login}}') : app.apiExports.query('/api/v1/user');
-  while (!release && app.state.scripts.length === 0) await new Promise(resolve => setImmediate(resolve));
-  app.session.cookies.emit('changed', {}, { name: platform === 'twitch' ? 'auth-token' : 'session_token', domain: platform === 'twitch' ? '.twitch.tv' : '.kick.com' }, 'explicit', false);
-  if (release) release();
-  await assert.rejects(pending, /Session changed/);
+  const changes = platform === 'twitch' ? [['inserted', false], ['overwrite', true]] : [['explicit', false]];
+  for (const [cause, removed] of changes) {
+    const app = loadApp();
+    app.apiExports.setupSession();
+    let release;
+    app.session.fetch = async () => { await new Promise(resolve => { release = resolve; }); return new Response('{"old":true}'); };
+    const pending = platform === 'twitch' ? app.apiExports.query('{currentUser{login}}') : app.apiExports.query('/api/v1/user');
+    while (!release && app.state.scripts.length === 0) await new Promise(resolve => setImmediate(resolve));
+    app.session.cookies.emit('changed', {}, { name: platform === 'twitch' ? 'auth-token' : 'session_token', domain: platform === 'twitch' ? '.twitch.tv' : '.kick.com' }, cause, removed);
+    if (release) release();
+    await assert.rejects(pending, /Session changed/);
+  }
 });
 
 test('logout clears application state and cancels an outstanding query', async () => {
@@ -123,6 +126,59 @@ test('ordinary token rotation for the same account keeps its earnings baseline',
 });
 
 if (platform === 'twitch') {
+  test('overwriting an auth cookie keeps live players and their verified account baseline', async () => {
+    const app = loadApp();
+    app.apiExports.setupSession();
+    const account = { id: '1', name: 'account_a', points: 100 };
+    setAccountResponses(app, account);
+    await app.apiExports.poll();
+    const slug = app.apiExports.config.channels[0];
+    app.apiExports.status.get(slug).live = true;
+    await app.handlers.get('farming:set')(app.event(), true);
+    const player = app.state.windows.at(-1);
+    assert.equal(app.apiExports.snapshot().channels[0].watching, true);
+    app.session.cookies.emit('changed', {}, { name: 'auth-token', domain: '.twitch.tv' }, 'overwrite', true);
+    assert.equal(player.isDestroyed(), false, 'replacement is not a logout');
+    assert.equal(app.apiExports.snapshot().channels[0].live, true);
+    app.session.cookies.emit('changed', {}, { name: 'auth-token', domain: '.twitch.tv' }, 'inserted-no-change-overwrite', false);
+    account.points = 110;
+    await app.apiExports.poll();
+    assert.equal(app.apiExports.snapshot().today, 170, 'the same account keeps its pre-refresh baseline');
+  });
+
+  test('an auth-cookie insertion revalidates the account while the login window is hidden', async () => {
+    const app = loadApp();
+    app.apiExports.setupSession();
+    setAccountResponses(app, { id: '1', name: 'account_a', points: 100 });
+    await app.apiExports.poll();
+    app.session.cookies.emit('changed', {}, { name: 'auth-token', domain: '.twitch.tv' }, 'overwrite', true);
+    app.session.cookies.emit('changed', {}, { name: 'auth-token', domain: '.twitch.tv' }, 'inserted', false);
+    await app.fireTimers(2500);
+    const actual = app.apiExports.snapshot();
+    assert.equal(actual.username, 'account_a');
+    assert.equal(actual.loggedIn, true);
+  });
+
+  test('an actual auth-cookie removal still clears live players and cached account data', async () => {
+    const app = loadApp();
+    app.apiExports.setupSession();
+    setAccountResponses(app, { id: '1', name: 'account_a', points: 100 });
+    await app.apiExports.poll();
+    app.apiExports.status.get(app.apiExports.config.channels[0]).live = true;
+    await app.handlers.get('farming:set')(app.event(), true);
+    const player = app.state.windows.at(-1);
+    app.session.cookies.emit('changed', {}, { name: 'auth-token', domain: '.twitch.tv' }, 'inserted', false);
+    app.session.cookies.emit('changed', {}, { name: 'auth-token', domain: '.twitch.tv' }, 'explicit', true);
+    assert.equal(player.isDestroyed(), true);
+    assert.equal(app.apiExports.status.size, 0);
+    assert.equal(app.apiExports.snapshot().loggedIn, false);
+    let requests = 0;
+    app.session.fetch = async () => { requests++; return new Response('{}'); };
+    await app.fireTimers(2500);
+    assert.equal(requests, 0, 'removal must cancel scheduled authenticated work');
+    assert.equal(app.apiExports.snapshot().loggedIn, false);
+  });
+
   test('a redemption response completing after logout cannot restore old account state', async () => {
     const app = loadApp();
     const { EventEmitter } = require('node:events');

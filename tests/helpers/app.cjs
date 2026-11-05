@@ -8,7 +8,7 @@ const { createRequire } = require('node:module');
 
 function loadApp({ packaged = false, platform = 'win32', configSeed = null } = {}) {
   const root = path.resolve(__dirname, '../..');
-  const state = { scripts: [], requests: [], writes: [], quit: 0, updates: 0, windows: [], ready: [], dialogResponse: 0, sockets: [] };
+  const state = { scripts: [], requests: [], writes: [], quit: 0, updates: 0, windows: [], ready: [], dialogResponse: 0, sockets: [], timers: [] };
   const cookies = new EventEmitter();
   cookies.get = async ({ name }) => [{ value: name === 'auth-token' || name === 'session_token' ? 'FAKE_ACCOUNT_TOKEN' : 'FAKE_OTHER_COOKIE' }];
   const session = {
@@ -81,7 +81,8 @@ function loadApp({ packaged = false, platform = 'win32', configSeed = null } = {
     },
     __dirname: root, module: { exports: {} }, Buffer, URL, console, AbortController, TextDecoder,
     process: { platform, env: {}, argv: [] },
-    setTimeout: () => 1, clearTimeout() {}, setInterval: () => 1, clearInterval() {}, setImmediate, queueMicrotask,
+    setTimeout: (callback, delay) => { const timer = { callback, delay, cancelled: false }; state.timers.push(timer); return timer; },
+    clearTimeout(timer) { if (timer) timer.cancelled = true; }, setInterval: () => 1, clearInterval() {}, setImmediate, queueMicrotask,
   };
   vm.createContext(context);
   const exported = 'module.exports = { query: typeof gql === "function" ? gql : kickFetch, poll, snapshot, setupSession, sendChat: typeof sendChat === "function" ? sendChat : null, watchRedemptions: typeof watchRedemptions === "function" ? watchRedemptions : null, setUsername(value) { username = value; }, setup(main, api) { mainWin = main; apiWin = api; apiReady = Promise.resolve(); }, status, config, get client() { return typeof apiClient === "undefined" ? null : apiClient; } };';
@@ -94,6 +95,12 @@ function loadApp({ packaged = false, platform = 'win32', configSeed = null } = {
   return {
     state, app, session, handlers, main, api, apiExports: context.module.exports,
     event: () => ({ sender: main.webContents, senderFrame: main.webContents.mainFrame }),
+    async fireTimers(delay) {
+      const timers = state.timers.filter(timer => timer.delay === delay);
+      state.timers = state.timers.filter(timer => timer.delay !== delay);
+      for (const timer of timers) if (!timer.cancelled) await timer.callback();
+      await new Promise(resolve => setImmediate(resolve));
+    },
     async start() { for (const callback of state.ready) await callback(); await new Promise(resolve => setImmediate(resolve)); },
   };
 }

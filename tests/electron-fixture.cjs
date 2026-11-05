@@ -59,6 +59,20 @@ app.whenReady().then(async () => {
     assert.match(observed.cookie, /fixture_token=FAKE_RUNTIME_TOKEN/);
     assert.equal(observed.authorization, 'OAuth FAKE_RUNTIME_TOKEN');
     console.log('Twitch main-process transport accepts wildcard-CORS responses with session cookies and OAuth.');
+    // Chromium reports a same-value cookie overwrite as a removal and insertion.
+    const cookieChanges = [];
+    const observeCookie = (_event, cookie, cause, removed) => {
+      if (cookie.name === 'fixture_token') cookieChanges.push({ cause, removed });
+    };
+    ses.cookies.on('changed', observeCookie);
+    await ses.cookies.set({ url: origin, name: 'fixture_token', value: 'FAKE_RUNTIME_TOKEN' });
+    const eventDeadline = Date.now() + 2000;
+    while (cookieChanges.length < 2 && Date.now() < eventDeadline) await new Promise(resolve => setTimeout(resolve, 10));
+    ses.cookies.removeListener('changed', observeCookie);
+    assert.equal(cookieChanges[0]?.cause, 'overwrite');
+    assert.equal(cookieChanges[0]?.removed, true);
+    assert.equal(cookieChanges[1]?.removed, false);
+    console.log('Native same-value cookie overwrite emits a transient removal followed by insertion.');
     await ses.clearStorageData();
     console.log('Electron transport fixture: session cookies, fixed destination, redirect refusal, timeout and invalidation passed.');
     server.closeAllConnections(); await new Promise(resolve => server.close(resolve));

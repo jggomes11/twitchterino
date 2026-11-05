@@ -114,7 +114,8 @@ async function freePort() {
     const args = ['--remote-debugging-address=127.0.0.1', '--remote-debugging-port=' + port];
     if (!windows) args.push('--no-sandbox', '--ozone-platform=headless', '--disable-gpu');
     child = spawn(executable, args, {
-      env: { ...process.env, [variable]: profile }, windowsHide: false,
+      // Only this empty CI profile enables the existing anonymous playback test mode.
+      env: { ...process.env, [variable]: profile, ...(namespace === 'tt' ? { TWITCHTERINO_ALLOW_ANON: '1' } : {}) }, windowsHide: false,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     child.stdout.on('data', chunk => { childLog = (childLog + String(chunk)).slice(-30000); });
@@ -157,6 +158,21 @@ async function freePort() {
       }));
       await screenshot(main, 'public-channels.png');
       assert(report.publicChannels.some(channel => channel.rewardsLoaded && !channel.error), 'No public channel query succeeded');
+      report.farmingToggle = { tested: false, scope: 'anonymous test playback only; no account or point accrual' };
+      if (observation.channels.some(channel => channel.live && channel.pointsEnabled)) {
+        await evaluate(main, 'document.querySelector("#farming").click()');
+        await until(async () => (await evaluate(main, 'window.tt.getState()')).channels.some(channel => channel.watching), 'player started through the farming toggle');
+        await pause(5000);
+        const playing = await evaluate(main, 'window.tt.getState()');
+        assert.equal(playing.farming, true);
+        assert(playing.channels.some(channel => channel.watching), 'Player disappeared after enabling farming');
+        assert(playing.channels.some(channel => channel.live && channel.rewardsLoaded), 'Enabling farming cleared live metadata');
+        report.farmingToggle = { ...report.farmingToggle, tested: true, liveChannels: playing.channels.filter(channel => channel.live).length, watching: playing.channels.filter(channel => channel.watching).length };
+        await screenshot(main, 'farming-enabled.png');
+        await evaluate(main, 'document.querySelector("#farming").click()');
+        await until(async () => { const current = await evaluate(main, 'window.tt.getState()'); return !current.farming && !current.channels.some(channel => channel.watching); }, 'player stopped through the farming toggle');
+        report.checks.push('farming toggle started and stopped a real player with public live metadata retained');
+      }
     }
 
     await evaluate(main, 'document.querySelector("#btn-settings")?.click()');

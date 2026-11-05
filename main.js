@@ -127,6 +127,7 @@ function isHiddenWatcher(webContents) {
 }
 
 const ALLOWED_PERMISSIONS = new Set(['fullscreen', 'clipboard-sanitized-write']);
+let authRefreshTimer = null;
 
 function setupSession() {
   const ses = session.fromPartition(PARTITION);
@@ -137,16 +138,28 @@ function setupSession() {
     cb({ cancel: BLOCKED_HOSTS.some((h) => details.url.includes(h)) || (HIDDEN_SKIP.has(details.resourceType) && isHiddenWatcher(details.webContents)) });
   });
   // Login feito: a janela de login some sozinha e o app já começa.
-  ses.cookies.on('changed', (_e, cookie, _cause, removed) => {
+  ses.cookies.on('changed', (_e, cookie, cause, removed) => {
     if (cookie.name !== 'auth-token' || !['twitch.tv', 'www.twitch.tv'].includes(cookie.domain.replace(/^\./, ''))) return;
+    clearTimeout(authRefreshTimer);
+    authRefreshTimer = null;
     apiClient.invalidate();
     verifiedAccountGeneration = -1;
     username = null;
     loggedIn = false;
     if (ircSend) { const socket = ircSend; ircSend = null; try { socket.close(); } catch {} }
-    if (removed) { resetAccountRuntime(); return; }
-    setTimeout(() => {
-      if (apiWin && !apiWin.isDestroyed() && apiWin.isVisible()) { apiWin.hide(); loadApi(LIGHT_URL).then(poll); }
+    if (removed) {
+      // Chromium removes the previous cookie before inserting its replacement.
+      // Invalidate old work, but keep players and baselines across that transient removal.
+      if (cause !== 'overwrite') resetAccountRuntime();
+      return;
+    }
+    const generation = apiClient.generation;
+    authRefreshTimer = setTimeout(async () => {
+      authRefreshTimer = null;
+      if (sessionTransition || generation !== apiClient.generation || !apiWin || apiWin.isDestroyed()) return;
+      if (apiWin.isVisible()) { apiWin.hide(); await loadApi(LIGHT_URL); }
+      if (sessionTransition || generation !== apiClient.generation) return;
+      await poll();
     }, 2500);
   });
 }
