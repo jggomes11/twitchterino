@@ -247,6 +247,66 @@ if (platform === 'twitch') {
     assert.equal(app.apiExports.status.size, 0);
   });
 
+  test('removing an unselected scoped cookie preserves the actual verified session and its windows', async () => {
+    const app = loadApp(); app.apiExports.setupSession();
+    const slug = app.apiExports.config.channels[0];
+    setAccountResponses(app, { id: '1', name: 'account_a', points: 100, live: [slug] });
+    await app.apiExports.poll(); const player = app.state.windows.at(-1);
+    await app.handlers.get('store:open')(app.event(), slug); const store = app.state.windows.at(-1);
+    app.session.cookies.emit('changed', {}, { name: 'auth-token', domain: '.twitch.tv', path: '/other' }, 'explicit', true);
+    const checking = app.apiExports.snapshot();
+    assert(checking.loggedIn || checking.sessionChecking);
+    await app.fireTimers(100);
+    assert.equal(app.apiExports.snapshot().username, 'account_a');
+    assert.equal(player.isDestroyed(), false);
+    assert.equal(store.isDestroyed(), false);
+  });
+
+  test('an obsolete player result cannot overwrite the current same-window health', async () => {
+    const app = loadApp(); app.apiExports.setupSession();
+    const slug = app.apiExports.config.channels[0];
+    setAccountResponses(app, { id: '1', name: 'account_a', points: 100, live: [slug] });
+    await app.apiExports.poll(); const player = app.state.windows.at(-1);
+    let release, checks = 0;
+    player.webContents.executeJavaScript = async () => {
+      if (checks++ === 0) return new Promise(resolve => { release = resolve; });
+      return { gate: false, video: { paused: false, time: 40, ready: 4 } };
+    };
+    const oldPoll = app.apiExports.poll();
+    while (!release) await new Promise(resolve => setImmediate(resolve));
+    app.session.cookies.emit('changed', {}, { name: 'auth-token', domain: '.twitch.tv' }, 'inserted', false);
+    await app.fireTimers(100);
+    release({ gate: true, video: null }); await oldPoll;
+    assert.equal(app.apiExports.snapshot().channels[0].ageGate, false);
+  });
+
+  test('obsolete player timeouts cannot destroy a healthy player in the current generation', async () => {
+    const app = loadApp(); app.apiExports.setupSession();
+    const slug = app.apiExports.config.channels[0];
+    setAccountResponses(app, { id: '1', name: 'account_a', points: 100, live: [slug] });
+    await app.apiExports.poll(); const player = app.state.windows.at(-1);
+    app.apiExports.status.get(slug).watchingSince = Date.now() - 4 * 60 * 1000;
+    const rejects = []; let checks = 0;
+    player.webContents.executeJavaScript = async () => {
+      if (++checks <= 3) return new Promise((_resolve, reject) => rejects.push(reject));
+      return { gate: false, video: { paused: false, time: 40, ready: 4 } };
+    };
+    const oldPolls = [app.apiExports.poll()];
+    while (rejects.length < 1) await new Promise(resolve => setImmediate(resolve));
+    for (let generation = 0; generation < 3; generation++) {
+      app.session.cookies.emit('changed', {}, { name: 'auth-token', domain: '.twitch.tv' }, 'inserted', false);
+      const next = app.fireTimers(100);
+      if (generation < 2) {
+        oldPolls.push(next);
+        while (rejects.length < generation + 2) await new Promise(resolve => setImmediate(resolve));
+      } else await next;
+    }
+    for (const reject of rejects) reject(new Error('timeout'));
+    await Promise.all(oldPolls);
+    assert.equal(player.isDestroyed(), false);
+    assert.equal(app.apiExports.snapshot().channels[0].watching, true);
+  });
+
   test('showing an already running player does not reload or replace it', async () => {
     const app = loadApp();
     const slug = app.apiExports.config.channels[0];
@@ -302,19 +362,21 @@ if (platform === 'twitch') {
   test('an actual auth-cookie removal still clears live players and cached account data', async () => {
     const app = loadApp();
     app.apiExports.setupSession();
-    setAccountResponses(app, { id: '1', name: 'account_a', points: 100 });
+    const account = { id: '1', name: 'account_a', points: 100 };
+    setAccountResponses(app, account);
     await app.apiExports.poll();
     app.apiExports.status.get(app.apiExports.config.channels[0]).live = true;
     await app.handlers.get('farming:set')(app.event(), true);
     const player = app.state.windows.at(-1);
     app.session.cookies.emit('changed', {}, { name: 'auth-token', domain: '.twitch.tv' }, 'inserted', false);
+    account.token = '';
     app.session.cookies.emit('changed', {}, { name: 'auth-token', domain: '.twitch.tv' }, 'explicit', true);
-    assert.equal(player.isDestroyed(), true);
-    assert.equal(app.apiExports.status.size, 0);
-    assert.equal(app.apiExports.snapshot().loggedIn, false);
     let requests = 0;
     app.session.fetch = async () => { requests++; return new Response('{}'); };
     await app.fireTimers(100);
+    assert.equal(player.isDestroyed(), true);
+    assert.equal(app.apiExports.status.size, 0);
+    assert.equal(app.apiExports.snapshot().loggedIn, false);
     assert.equal(requests, 0, 'removal must cancel scheduled authenticated work');
     assert.equal(app.apiExports.snapshot().loggedIn, false);
   });

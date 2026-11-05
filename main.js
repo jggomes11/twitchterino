@@ -149,7 +149,8 @@ function setupSession() {
   });
   // Cookie events describe storage operations, not whether an account signed out.
   // Check the cookie actually selected by our API before changing the displayed session.
-  ses.cookies.on('changed', (_e, changedCookie, cause, removed) => {
+  ses.cookies.on('changed', (_e, changedCookie) => {
+    if (sessionTransition) return;
     if (changedCookie.name !== 'auth-token' || !['twitch.tv', 'www.twitch.tv'].includes(changedCookie.domain.replace(/^\./, ''))) return;
     clearTimeout(authRefreshTimer);
     authRefreshTimer = null;
@@ -159,15 +160,6 @@ function setupSession() {
     sessionChecking = true;
     cookieCheckPending = true;
     if (ircSend) { const socket = ircSend; ircSend = null; try { socket.close(); } catch {} }
-    if (removed && cause !== 'overwrite') {
-      verifiedTokenDigest = null;
-      username = null;
-      sessionChecking = false;
-      cookieCheckPending = false;
-      resetAccountRuntime();
-      send('status', snapshot());
-      return;
-    }
     const generation = apiClient.generation;
     authRefreshTimer = setTimeout(async () => {
       authRefreshTimer = null;
@@ -1000,7 +992,9 @@ function openNextStore() {
 
 // Confere cada live oculta: aviso de conteúdo adulto (só a pessoa pode confirmar) e estado do player.
 async function checkPlayers() {
+  const generation = apiClient.generation;
   for (const [slug, win] of watchers) {
+    if (sessionTransition || generation !== apiClient.generation) return;
     const s = status.get(slug);
     if (!s || win.isDestroyed() || userOpened.has(win)) continue;
     const info = await withTimeout(win.webContents.executeJavaScript(`(() => {
@@ -1012,12 +1006,13 @@ async function checkPlayers() {
     })()`), PLAYER_CHECK_MS).catch((err) => {
       // Página lenta (PC fraco, Linux sem aceleração) não é página travada: só fecha depois de
       // 3 checagens seguidas sem resposta e nunca nos primeiros 3 min da live.
-      if (err.message !== 'timeout' || watchers.get(slug) !== win) return null;
+      if (sessionTransition || generation !== apiClient.generation || err.message !== 'timeout' || watchers.get(slug) !== win || status.get(slug) !== s) return null;
       s.playerTimeouts = (s.playerTimeouts || 0) + 1;
       if (s.playerTimeouts >= 3 && Date.now() - (s.watchingSince || 0) > 3 * 60 * 1000) { s.playerTimeouts = 0; stopWatcher(slug); }
       return null;
     });
-    if (!info) continue;
+    if (sessionTransition || generation !== apiClient.generation) return;
+    if (!info || watchers.get(slug) !== win || status.get(slug) !== s) continue;
     s.playerTimeouts = 0;
     s.ageGate = info.gate;
     s.video = info.video;

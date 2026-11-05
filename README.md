@@ -16,6 +16,14 @@ Twitchterino is an Electron client for Twitch chat and PokeIdle channel-point tr
 
 The platform's own web pages still handle their normal website login and cookies. These changes do not certify the application or its external services as vulnerability-free.
 
+## Automatic playback
+
+Sign in once in the official Twitch window. Enable **Todas as lives online** in settings and turn on **Juntar pontos** to start the online channels from your list automatically; newly live channels are picked up by polling. Selecting a channel changes the chat. **Mostrar player** reveals an existing player without reloading it and is not required for background playback.
+
+Disable all-live mode to use **Limite de lives** and bonus prioritization. Age-confirmation prompts still require confirmation on the official page. Verify actual point awards by comparing each channel's balance.
+
+For isolated Windows validation bundles and reuse of an existing local test login, see [Windows validation](docs/WINDOWS_VALIDATION.md).
+
 ## Run and test from source
 
 Use Node.js 22.13 or newer (Node.js 24 is used for validation).

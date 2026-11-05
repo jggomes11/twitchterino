@@ -234,6 +234,7 @@ async function freePort() {
         });
         const revealSlug = allPlaying.channels.find(channel => channel.watching).slug;
         const target = (await targets()).find(item => { try { return new URL(item.url).pathname === '/' + revealSlug; } catch { return false; } });
+        assert(target, 'No live player target available to verify reveal without reload');
         if (target) {
           const connection = playerConnections.get(target.id) || await connect(target.webSocketDebuggerUrl);
           playerConnections.set(target.id, connection);
