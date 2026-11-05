@@ -53,6 +53,14 @@ jobs:
       - name: Verify the manual bundle launcher
         if: always() && steps.package.outcome == 'success'
         run: ./validation-output/Start-WindowsValidation.ps1 -CheckOnly
+      - name: Verify existing-profile selection stays inside the isolated profile root
+        if: always() && steps.package.outcome == 'success'
+        shell: pwsh
+        run: |
+          $ProbeProfile = Join-Path $env:LOCALAPPDATA 'ChannelClientValidation/twitchterino/000000000000'
+          New-Item -ItemType Directory -Path $ProbeProfile -Force | Out-Null
+          try { ./validation-output/Start-WindowsValidation.ps1 -CheckOnly -ProfileCommit '000000000000' }
+          finally { Remove-Item -LiteralPath $ProbeProfile -Force }
       - name: Preserve Windows evidence and validation build
         # The launcher checks hashes without opening another GUI during CI.
         if: always()

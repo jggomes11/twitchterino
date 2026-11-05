@@ -1,5 +1,8 @@
 [CmdletBinding()]
-param([switch]$CheckOnly)
+param(
+    [switch]$CheckOnly,
+    [ValidatePattern('^[0-9a-f]{12}$')][string]$ProfileCommit
+)
 $ErrorActionPreference = 'Stop'
 $Root = $PSScriptRoot
 $Manifest = Get-Content -LiteralPath (Join-Path $Root 'build-info.json') -Raw | ConvertFrom-Json
@@ -18,8 +21,10 @@ foreach ($Entry in $Manifest.files) {
     $Hash = (Get-FileHash -LiteralPath $File -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($Hash -ne $Entry.sha256) { throw ('File integrity check failed: ' + $Entry.path) }
 }
+$ProfileId = if ($ProfileCommit) { $ProfileCommit.ToLowerInvariant() } else { $Manifest.sourceSha.Substring(0, 12) }
+$ValidationProfile = Join-Path $env:LOCALAPPDATA ('ChannelClientValidation\' + $Manifest.repository + '\' + $ProfileId)
+if ($ProfileCommit -and -not (Test-Path -LiteralPath $ValidationProfile -PathType Container)) { throw 'The requested isolated validation profile does not exist.' }
 if ($CheckOnly) { Write-Host 'Windows validation bundle integrity checks passed.'; exit 0 }
-$ValidationProfile = Join-Path $env:LOCALAPPDATA ('ChannelClientValidation\' + $Manifest.repository + '\' + $Manifest.sourceSha.Substring(0, 12))
 New-Item -ItemType Directory -Path $ValidationProfile -Force | Out-Null
 $Config = Join-Path $ValidationProfile 'config.json'
 if (-not (Test-Path -LiteralPath $Config)) {

@@ -21,7 +21,7 @@ The launcher does not enable remote debugging, upload logs, collect passwords or
 ## Real point accrual
 
 1. Use one eligible channel that is currently live and has channel points enabled. Close other streams for the same platform account while measuring.
-2. Keep the simultaneous-live setting at 1 and rotation off. For Twitch, leave automatic bonus-chest collection off so it does not confuse the measurement.
+2. For a single-channel baseline, turn off **Todas as lives online**, keep the simultaneous-live setting at 1 and rotation off. Then enable all-live mode to compare balances per channel. For Twitch, leave automatic bonus-chest collection off so it does not confuse the measurement.
 3. Enable viewing/point collection and confirm that the video is progressing; resolve any age-confirmation prompt manually.
 4. Record the balance before the measurement and after approximately 15 minutes. Do not redeem rewards during this period.
 5. Record whether the balance increased, the elapsed time and any client error. A running video alone does not prove that the platform awarded points.
@@ -40,3 +40,11 @@ Return only the source commit, Windows version/display scale, whether login and 
 
 Automated evidence under `evidence/` contains screenshots and a JSON report from the empty CI profile. It must not be described as a successful real login or a real points test.
 
+
+## Session continuity and automatic all-live mode
+
+To reuse an existing local test login, supply the previous profile's 12-character commit prefix, for example `& .\Start-WindowsValidation.ps1 -ProfileCommit 92cc2da5780e`. The profile must already exist under this repository's isolated validation-profile root. The launcher still verifies the current application files first; it does not copy or upload credentials.
+
+Enable **Todas as lives online** in settings, then **Juntar pontos**. The fixed count is disabled in this mode. Selecting a channel changes the chat; **Mostrar player** only reveals the running stream. Newly live channels are picked up on the next poll. Test new arrivals and leaving/revealing a player without losing the recognized account. Age-confirmation prompts still require the user to confirm on the official page.
+
+The new bundle starts paused with all-live mode selected. CI explicitly starts with fixed-count settings and separately exercises all-live mode with an empty anonymous profile, recording video state/progress as diagnostic evidence. This is not a real account or points test.
