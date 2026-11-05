@@ -49,8 +49,7 @@
     },
     "win": {
       "target": [
-        "nsis",
-        "portable"
+        "nsis"
       ],
       "icon": "build/icon.png"
     },
@@ -62,10 +61,6 @@
       "createStartMenuShortcut": true,
       "shortcutName": "Twitchterino",
       "runAfterFinish": true
-    },
-    "portable": {
-      "unpackDirName": true,
-      "artifactName": "Twitchterino-portatil.exe"
     },
     "linux": {
       "target": [

@@ -51,7 +51,7 @@ jobs:
       - name: Package Windows without publishing
         id: package
         run: |
-          if ($env:BUILD_RELEASE -eq 'true') { npm run dist -- --x64 --publish never }
+          if ($env:BUILD_RELEASE -eq 'true') { npm run dist -- --win nsis --x64 --publish never }
           else { npm run dist -- --dir --publish never }
       - name: Validate packaged UI and official login navigation
         run: node scripts/validate-desktop.cjs

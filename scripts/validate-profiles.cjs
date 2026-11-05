@@ -9,7 +9,7 @@ const pkg = require('../package.json');
 
 assert.equal(process.platform, 'win32', 'Validate portable profile processes on native Windows');
 const root = path.resolve(__dirname, '..');
-const executable = path.join(root, 'release-output', 'portable', 'Twitchterino-portatil.exe');
+const executable = path.join(root, 'release-output', 'portable', 'app', 'Twitchterino.exe');
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'twitchterino-profile-validation-'));
 const children = [];
 const report = { version: pkg.version, scope: 'four empty portable profiles; no account or point awards', passed: false };
@@ -46,23 +46,20 @@ function launch(profile) {
     }
     await pause(3000);
     assert(profiles.every(profile => profile.child.exitCode === null), 'Four profiles did not stay open concurrently');
-    const parents = profiles.map(profile => profile.child.pid).join(',');
-    const processes = spawnSync('powershell.exe', ['-NoProfile', '-Command',
-      `Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -in @(${parents}) -and $_.Name -eq 'Twitchterino.exe' } | Select-Object ExecutablePath | ConvertTo-Json -Compress`,
-    ], { encoding: 'utf8' });
-    assert.equal(processes.status, 0, 'Could not inspect portable child processes');
-    const paths = [].concat(JSON.parse(processes.stdout)).map(item => item.ExecutablePath);
-    assert.equal(paths.length, 4, 'Expected one native application process per portable launcher');
-    assert.equal(new Set(paths.map(file => file.toLowerCase())).size, 4, 'Portable launches share an extraction directory');
     const duplicate = launch(profiles[0].path);
     const duplicateDeadline = Date.now() + 30000;
     while (duplicate.exitCode === null && !duplicate.launchError && Date.now() < duplicateDeadline) await pause(250);
     assert(!duplicate.launchError, 'Duplicate launch failed before testing the lock');
     assert.equal(duplicate.exitCode, 0, 'Opening an existing profile did not exit cleanly');
     assert(profiles.every(profile => profile.child.exitCode === null), 'Duplicate launch stopped an existing profile');
+    const stopped = spawnSync('taskkill', ['/PID', String(profiles[0].child.pid), '/T', '/F'], { stdio: 'ignore' });
+    assert.equal(stopped.status, 0, 'Could not close the first test profile');
+    await pause(1000);
+    assert(profiles.slice(1).every(profile => profile.child.exitCode === null), 'Closing one profile stopped another');
     report.simultaneousProfiles = profiles.length;
     report.firstLaunchCreatedProfiles = true;
-    report.uniqueExtractionDirectories = paths.length;
+    report.portableFormat = 'directory-zip';
+    report.closingOnePreservedOthers = true;
     report.sameProfileSecondLaunchExited = true;
     report.passed = true;
     console.log(JSON.stringify(report, null, 2));
