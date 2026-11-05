@@ -106,14 +106,30 @@ function avatar(ch, size = '') {
 // Baú de bônus: mostra se o app está pegando agora, se está na fila ou esperando a próxima tentativa.
 function chestButton(ch) {
   const auto = !!state.autoChest;
-  const label = ch.chestState === 'claiming' ? '🎁 pegando…' : ch.chestState === 'queued' ? '🎁 na fila' : '🎁';
+  const failure = {
+    'Bonus button not found': 'O botão do baú não apareceu na Twitch.',
+    'Bonus unavailable': 'A Twitch mostrou o botão do baú indisponível.',
+    'Claim not confirmed': 'A Twitch ainda não confirmou o bônus no saldo.',
+    'Confirmation failed': 'Não foi possível confirmar o resgate na Twitch.',
+    'Session changed': 'A sessão mudou durante o resgate.',
+  }[ch.chestError] || 'O resgate não foi confirmado.';
+  const label = ch.chestState === 'claiming' ? '🎁 pegando…' : ch.chestState === 'queued' ? '🎁 na fila' : ch.chestState === 'retry' ? '🎁 tentar novamente' : '🎁';
   const c = el('button', 'chest-mini' + (ch.chestState ? ` ${ch.chestState}` : ''), label);
   c.title = !auto ? 'Baú de bônus: clique para abrir o chat e pegar +50'
     : ch.chestState === 'claiming' ? 'O app está pegando este baú agora'
     : ch.chestState === 'queued' ? 'Na fila: o app pega um baú de cada vez'
+    : ch.chestState === 'retry' ? failure + ' O app tentará novamente; clique para conferir na Twitch.'
     : 'Baú de bônus: o app vai pegar sozinho em instantes. Clique para abrir o chat e pegar agora.';
   c.onclick = (e) => { e.stopPropagation(); window.tt.openStore(ch.slug); };
   return c;
+}
+
+function pendingPlaybackLabel() {
+  if (state.sessionChecking) return 'VERIFICANDO SESSÃO';
+  if (!state.farming) return 'PAUSADO';
+  if (!state.loggedIn) return 'ENTRAR';
+  if (state.watchAll) return 'INICIANDO';
+  return state.rotation ? 'NA FILA' : 'SEM VAGA';
 }
 
 function channelCard(ch) {
@@ -131,7 +147,7 @@ function channelCard(ch) {
   else if (ch.earning === 'earning') sub.append(el('span', 'earn', '● ganhando'));
   else if (ch.earning === 'warming') sub.append(el('span', 'warm', '◌ aquecendo'));
   else if (ch.earning === 'idle') sub.append(el('span', 'idle', '○ sem pontos'));
-  else if (ch.live) sub.append(el('span', 'viewers', `${fmt(ch.viewers)} assistindo${queued ? ' · na fila' : ''}`));
+  else if (ch.live) sub.append(el('span', 'viewers', `${fmt(ch.viewers)} assistindo${queued ? ' · ' + pendingPlaybackLabel().toLowerCase() : ''}`));
   else sub.append(el('span', 'off', ch.rewardsLoaded && !ch.hasBonus ? 'bônus em breve' : 'offline'));
   info.append(name, sub);
   const side = el('div', 'ch-side');
@@ -290,8 +306,8 @@ function renderLimitTest() {
     return;
   }
   btn.textContent = state.limitResult ? 'Refazer teste de várias lives' : 'Testar várias lives';
-  btn.disabled = !state.loggedIn;
-  btn.title = state.loggedIn ? 'Abre as lives ao vivo com a sua conta (até 10) e mede em quantas os pontos sobem ao mesmo tempo; depois testa números menores (~20 min por etapa) e fica com o que rende mais.' : 'Faça login na Twitch para testar';
+  btn.disabled = !state.loggedIn || !!state.watchAll;
+  btn.title = state.watchAll ? 'Desligue Todas as lives online para testar limites de reprodução.' : state.loggedIn ? 'Abre as lives ao vivo com a sua conta (até 10) e mede em quantas os pontos sobem ao mesmo tempo; depois testa números menores (~20 min por etapa) e fica com o que rende mais.' : 'Faça login na Twitch para testar';
   const r = state.limitResult;
   if (!r) return;
   info.append(el('div', 'limit-now', `Último teste (${new Date(r.at).toLocaleString('pt-BR')}): usando ${r.chosen} lives`));
@@ -327,7 +343,7 @@ function renderPanel() {
       : ch.earning === 'earning' ? el('span', 'pill watching', 'GANHANDO')
       : ch.earning === 'warming' ? el('span', 'pill warming', 'AQUECENDO')
       : ch.earning === 'idle' ? el('span', 'pill stalled', 'SEM PONTOS')
-      : ch.live ? el('span', 'pill queue', state.rotation ? 'NA FILA' : 'SEM VAGA') : el('span', 'pill', 'offline');
+      : ch.live ? el('span', 'pill queue', pendingPlaybackLabel()) : el('span', 'pill', 'offline');
     if (ch.earning === 'warming') st.title = 'A Twitch dá a primeira contagem ~5 min depois que a live abre.';
     if (ch.earning === 'idle') st.title = 'Tocando há mais de 13 min sem o saldo subir.';
     if (ch.live && ch.goalLeft != null && state.rotation) st.title = `${st.title || ''}\nFaltam ${ch.goalLeft} pts para ${ch.goal}`.trim();
@@ -355,7 +371,7 @@ function renderPanel() {
   const chip = (icon, value, label, cls = '') => { const c = el('span', `stat ${cls}`); c.append(el('i', null, icon), el('b', null, value), el('small', null, label)); sum.append(c); };
   chip('🔴', String(live), 'ao vivo');
   if (state.loggedIn) {
-    chip('▶', String(watching), queued ? `assistindo · ${queued} na fila` : 'assistindo', watching ? 'on' : '');
+    chip('▶', String(watching), queued ? `assistindo · ${queued} aguardando` : 'assistindo', watching ? 'on' : '');
     chip('💜', fmt(totalPts), 'pontos');
     chip('📈', `+${fmt(state.today || 0)}`, 'hoje', 'up');
     if (state.chestsToday) chip('🎁', String(state.chestsToday), state.chestsToday === 1 ? 'baú hoje' : 'baús hoje', 'gold');
@@ -365,8 +381,8 @@ function renderPanel() {
 // Sem login: um cartão explica o que fazer, no lugar do chat vazio.
 function renderWelcome() {
   const card = $('#welcome-card');
-  card.hidden = !!state.loggedIn;
-  if (state.loggedIn || card.childElementCount) return;
+  card.hidden = !!state.loggedIn || !!state.sessionChecking;
+  if (state.loggedIn || state.sessionChecking || card.childElementCount) return;
   card.append(el('div', 'wc-icon', '💜'), el('h3', null, 'Entre com a sua conta da Twitch'),
     el('p', null, 'O Twitchterino deixa as lives do PokeIdle tocando em segundo plano, pega o baú de +50 por você, mostra o saldo de cada canal com o preço real dos bônus e avisa quando dá para comprar.'),
     button('Entrar com a Twitch', 'primary', () => window.tt.showLogin()),
@@ -416,6 +432,9 @@ function applyState(s) {
   }
   if (!active && state.channels.length) active = state.channels[0].slug;
   $('#farming').checked = state.farming;
+  $('#watch-all').checked = !!state.watchAll;
+  $('#max-watchers').disabled = !!state.watchAll;
+  $('#rotation').disabled = !!state.watchAll;
   $('#low-quality').checked = state.lowQuality;
   $('#rotation').checked = state.rotation;
   renderTargetSelect();
@@ -433,8 +452,9 @@ function applyState(s) {
   if (state.intro && !introShown) { introShown = true; showIntro(state.intro); }
   if (!$('#modal').hidden && modalKind === 'sleep') renderSleepList();
   $('#memory').textContent = state.memoryMB ? `${state.memoryMB} MB` : '';
-  $('#btn-login').textContent = state.loggedIn ? `✓ ${state.username || 'Conectado'}` : 'Entrar com a Twitch';
-  $('#btn-login').title = state.loggedIn ? 'Conta conectada. Para sair, abra as configurações (⚙).' : 'Abre a Twitch para você fazer login (uma vez só)';
+  $('#btn-login').disabled = !!state.sessionChecking;
+  $('#btn-login').textContent = state.sessionChecking ? 'Verificando sessão…' : state.loggedIn ? `✓ ${state.username || 'Conectado'}` : 'Entrar com a Twitch';
+  $('#btn-login').title = state.sessionChecking ? 'Confirmando a sessão salva neste computador.' : state.loggedIn ? 'Conta conectada. Para sair, abra as configurações (⚙).' : 'Abre a Twitch para você fazer login (uma vez só)';
   $('#btn-login').classList.toggle('ok', !!state.loggedIn);
   $('#btn-logout').hidden = !state.loggedIn;
   if (document.activeElement !== $('#max-watchers')) $('#max-watchers').value = state.maxWatchers;
@@ -681,6 +701,7 @@ $('#btn-login').onclick = () => window.tt.showLogin();
 $('#btn-logout').onclick = async () => applyState(await window.tt.logout());
 $('#btn-refresh').onclick = async () => applyState(await window.tt.refresh());
 $('#farming').onchange = async (e) => applyState(await window.tt.setFarming(e.target.checked));
+$('#watch-all').onchange = async (e) => applyState(await window.tt.setWatchAll(e.target.checked));
 $('#btn-limit').onclick = async () => applyState(await (state.limitTest ? window.tt.stopLimitTest() : window.tt.startLimitTest()));
 $('#autostart').onchange = async (e) => applyState(await window.tt.setAutostart(e.target.checked));
 $('#btn-quit').onclick = () => window.tt.quit();

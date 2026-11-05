@@ -6,9 +6,16 @@
 const {
   app, BrowserWindow, dialog, ipcMain, session, Tray, Menu, Notification, nativeImage, powerSaveBlocker, powerMonitor, net,
 } = require('electron');
-const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
+const { createHash } = require('node:crypto');
+const { createPlatformClient } = require('./security/platform');
+const { readCookie } = require('./security/requests');
+const { selectReportAccount } = require('./security/accounts');
+const { chestClickScript } = require('./security/chest');
+const { createIpcRegistrar } = require('./security/ipc');
+const { pathToFileURL } = require('node:url');
+const UI_DOCUMENT = pathToFileURL(path.join(__dirname, 'renderer', 'index.html')).href;
 
 // Mantém vídeos rodando mesmo com janelas ocultas/minimizadas.
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
@@ -26,9 +33,41 @@ if (process.env.TWITCHTERINO_DATA) app.setPath('userData', process.env.TWITCHTER
 app.userAgentFallback = app.userAgentFallback.replace(/ (Electron|twitchterino|Twitchterino)\/\S+/g, '');
 
 const PARTITION = 'persist:twitch';
+const apiClient = createPlatformClient('twitch', () => session.fromPartition(PARTITION));
+let sessionTransition = false;
+let verifiedAccountGeneration = -1;
+let verifiedTokenDigest = null;
+let sessionChecking = false;
+let cookieCheckPending = false;
+const tokenDigest = token => token ? createHash('sha256').update(token).digest('hex') : null;
+function assertSession(generation) {
+  if (sessionTransition || apiClient.generation !== generation) throw new Error('Session changed');
+}
+
+function cancelAccountWindows() {
+  storeSequence = null;
+  const windows = [...storeWindows.values()];
+  storeWindows.clear();
+  for (const win of windows) if (!win.isDestroyed()) win.destroy();
+  chestQueue.length = 0;
+  lastClaimTry.clear();
+  for (const win of chestWindows) if (!win.isDestroyed()) win.destroy();
+}
+
+function resetAccountRuntime() {
+  cancelAccountWindows();
+  for (const slug of [...watchers.keys()]) stopWatcher(slug);
+  confirmedChestClaims.clear();
+  status.clear();
+}
+
+function adoptVerifiedAccount(account) {
+  if (selectReportAccount(config, account)) resetAccountRuntime();
+  verifiedAccountGeneration = apiClient.generation;
+  configDirty = true;
+}
 const TWITCH = 'https://www.twitch.tv';
 const GQL = 'https://gql.twitch.tv/gql';
-const CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko'; // o mesmo do site da Twitch
 const POLL_MS = 60 * 1000;
 const PLAYER_CHECK_MS = 30 * 1000;
 const LOGIN_RE = /^[a-z0-9_]{2,25}$/;
@@ -41,6 +80,7 @@ const DEFAULT_CONFIG = {
     'matta', 'rodil', 'biscoitao', 'cogu', 'tftoddy', 'luccatv', 'techzz', 'revolta', 'yetz',
   ],
   farming: true,
+  watchAll: false,
   // A Twitch conta no máximo 2 lives por IP como espectador: mais que isso é testado à parte.
   maxWatchers: 2,
   lowQuality: true,
@@ -99,6 +139,7 @@ function isHiddenWatcher(webContents) {
 }
 
 const ALLOWED_PERMISSIONS = new Set(['fullscreen', 'clipboard-sanitized-write']);
+let authRefreshTimer = null;
 
 function setupSession() {
   const ses = session.fromPartition(PARTITION);
@@ -108,12 +149,56 @@ function setupSession() {
   ses.webRequest.onBeforeRequest({ urls: ['*://*/*'] }, (details, cb) => {
     cb({ cancel: BLOCKED_HOSTS.some((h) => details.url.includes(h)) || (HIDDEN_SKIP.has(details.resourceType) && isHiddenWatcher(details.webContents)) });
   });
-  // Login feito: a janela de login some sozinha e o app já começa.
-  ses.cookies.on('changed', (_e, cookie, _cause, removed) => {
-    if (cookie.name !== 'auth-token' || removed) return;
-    setTimeout(() => {
-      if (apiWin && !apiWin.isDestroyed() && apiWin.isVisible()) { apiWin.hide(); loadApi(LIGHT_URL).then(poll); }
-    }, 2500);
+  // Cookie events describe storage operations, not whether an account signed out.
+  // Check the cookie actually selected by our API before changing the displayed session.
+  ses.cookies.on('changed', (_e, changedCookie) => {
+    if (sessionTransition) return;
+    if (changedCookie.name !== 'auth-token' || !['twitch.tv', 'www.twitch.tv'].includes(changedCookie.domain.replace(/^\./, ''))) return;
+    clearTimeout(authRefreshTimer);
+    authRefreshTimer = null;
+    apiClient.invalidate();
+    verifiedAccountGeneration = -1;
+    loggedIn = false;
+    sessionChecking = true;
+    cookieCheckPending = true;
+    if (ircSend) { const socket = ircSend; ircSend = null; try { socket.close(); } catch {} }
+    const generation = apiClient.generation;
+    authRefreshTimer = setTimeout(async () => {
+      authRefreshTimer = null;
+      try {
+        const token = await authToken();
+        if (sessionTransition || generation !== apiClient.generation || !apiWin || apiWin.isDestroyed()) return;
+        cookieCheckPending = false;
+        if (!token) {
+          verifiedTokenDigest = null;
+          username = null;
+          loggedIn = false;
+          sessionChecking = false;
+          resetAccountRuntime();
+          send('status', snapshot());
+          return;
+        }
+        if (verifiedTokenDigest && tokenDigest(token) === verifiedTokenDigest && username) {
+          verifiedAccountGeneration = generation;
+          loggedIn = true;
+          sessionChecking = false;
+        } else {
+          cancelAccountWindows();
+        }
+        if (apiWin.isVisible()) { apiWin.hide(); void loadApi(LIGHT_URL); }
+        send('status', snapshot());
+        if (loggedIn) reconcileWatchers();
+        await poll();
+      } catch {
+        if (generation !== apiClient.generation || sessionTransition) return;
+        cookieCheckPending = false;
+        sessionChecking = false;
+        loggedIn = false;
+        cancelAccountWindows();
+        reconcileWatchers();
+        send('status', snapshot());
+      }
+    }, 100);
   });
 }
 
@@ -145,11 +230,14 @@ function isTrustedUrl(url) {
 }
 
 app.on('web-contents-created', (_e, wc) => {
-  wc.setWindowOpenHandler(({ url }) => (isTrustedUrl(url) ? {
+  wc.setWindowOpenHandler(({ url }) => (wc !== mainWin?.webContents && isTrustedUrl(url) ? {
     action: 'allow',
-    overrideBrowserWindowOptions: { width: 520, height: 720, autoHideMenuBar: true, webPreferences: { partition: PARTITION } },
+    overrideBrowserWindowOptions: { width: 520, height: 720, autoHideMenuBar: true, webPreferences: { partition: PARTITION, sandbox: true, contextIsolation: true, nodeIntegration: false } },
   } : { action: 'deny' }));
-  const guard = (details) => { if (details.isMainFrame && !isTrustedUrl(details.url)) details.preventDefault(); };
+  const guard = (details) => {
+    if (wc === mainWin?.webContents ? (!details.isMainFrame || details.url !== UI_DOCUMENT) : (details.isMainFrame && !isTrustedUrl(details.url))) details.preventDefault();
+  };
+  wc.on('will-frame-navigate', guard);
   wc.on('will-navigate', guard);
   wc.on('will-redirect', guard);
 });
@@ -163,7 +251,7 @@ const withTimeout = (promise, ms) => Promise.race([
 
 function loadApi(url) {
   apiReady = new Promise((resolve) => apiWin.webContents.once('did-finish-load', resolve));
-  apiWin.loadURL(url);
+  apiWin.loadURL(url).catch(() => {});
   return apiReady;
 }
 
@@ -187,28 +275,13 @@ function createApiWindow() {
 }
 
 async function cookie(name) {
-  const list = await session.fromPartition(PARTITION).cookies.get({ url: TWITCH, name });
-  return list[0] ? decodeURIComponent(list[0].value) : '';
+  return readCookie(session.fromPartition(PARTITION), TWITCH, name);
 }
 const authToken = () => cookie('auth-token');
 
-// Consulta a API do site da Twitch (GraphQL) de dentro da página twitch.tv, como o próprio site faz.
+// Authenticated queries stay in the main process, independent of the login document.
 async function gql(query) {
-  await withTimeout(apiReady, 20 * 1000);
-  const token = await authToken();
-  const device = await cookie('unique_id');
-  const code = `(async () => {
-    const headers = { 'Client-Id': ${JSON.stringify(CLIENT_ID)}, 'Content-Type': 'text/plain;charset=UTF-8' };
-    const token = ${JSON.stringify(token)}, device = ${JSON.stringify(device)};
-    if (token) headers['Authorization'] = 'OAuth ' + token;
-    if (device) headers['X-Device-Id'] = device;
-    const r = await fetch(${JSON.stringify(GQL)}, { method: 'POST', headers, body: ${JSON.stringify(JSON.stringify({ query }))} });
-    return { status: r.status, text: await r.text() };
-  })()`;
-  const res = await withTimeout(apiWin.webContents.executeJavaScript(code, true), 20 * 1000);
-  let json = null;
-  try { json = JSON.parse(res.text); } catch {}
-  return { status: res.status, json };
+  return apiClient.request('/gql', { method: 'POST', body: { query } });
 }
 
 // ---------- Recompensas do PokeIdle ----------
@@ -359,21 +432,25 @@ function watchRedemptions(slug, wc) {
   if (!dbg.isAttached()) { try { dbg.attach('1.3'); } catch { return; } }
   const pending = new Map();
   dbg.on('message', async (_e, method, p) => {
+    if (sessionTransition || wc.isDestroyed()) return;
+    const generation = apiClient.generation;
     if (method === 'Network.requestWillBeSent' && p.request.url.startsWith(GQL)) {
+      if (verifiedAccountGeneration !== generation) return;
       let body = p.request.postData;
       if (!body && p.request.hasPostData) body = (await dbg.sendCommand('Network.getRequestPostData', { requestId: p.requestId }).catch(() => ({}))).postData;
-      if (!body || !body.includes('RedeemCustomReward')) return;
+      if (generation !== apiClient.generation || verifiedAccountGeneration !== generation || sessionTransition || wc.isDestroyed() || !body || !body.includes('RedeemCustomReward')) return;
       try {
         const ops = [].concat(JSON.parse(body));
         const op = ops.find((o) => o.operationName === 'RedeemCustomReward');
         const input = op && op.variables && op.variables.input;
-        if (input) pending.set(p.requestId, input);
+        if (input) pending.set(p.requestId, { input, generation });
       } catch {}
     } else if (method === 'Network.loadingFinished' && pending.has(p.requestId)) {
-      const input = pending.get(p.requestId);
+      const operation = pending.get(p.requestId);
+      const input = operation.input;
       pending.delete(p.requestId);
       const res = await dbg.sendCommand('Network.getResponseBody', { requestId: p.requestId }).catch(() => null);
-      if (!res) return;
+      if (!res || operation.generation !== apiClient.generation || verifiedAccountGeneration !== apiClient.generation || sessionTransition || wc.isDestroyed()) return;
       let ok = false;
       try {
         const r = [].concat(JSON.parse(res.base64Encoded ? Buffer.from(res.body, 'base64').toString() : res.body))
@@ -491,19 +568,33 @@ let username = null;
 let chestNotifiedAt = 0;
 
 async function refreshAll() {
+  const generation = apiClient.generation;
+  assertSession(generation);
   const slugs = config.channels.filter((s) => LOGIN_RE.test(s));
   const fresh = [];
   // A Twitch aceita no máximo 15 consultas por chamada: vai de 10 em 10.
   for (let i = 0; i < slugs.length; i += 10) {
     const part = slugs.slice(i, i + 10);
-    const query = `query{ ${i === 0 ? 'currentUser{ login displayName }' : ''} ${part.map((slug, j) => `c${j}: user(login: ${JSON.stringify(slug)}){ ${CHANNEL_FIELDS} }`).join(' ')} }`;
+    const query = `query{ ${i === 0 ? 'currentUser{ id login displayName }' : ''} ${part.map((slug, j) => `c${j}: user(login: ${JSON.stringify(slug)}){ ${CHANNEL_FIELDS} }`).join(' ')} }`;
     let data = null, err = null;
     try {
       const { status: code, json } = await gql(query);
       if (code !== 200 || !json || !json.data) throw new Error(`HTTP ${code}`);
       data = json.data;
     } catch (e) { err = String(e.message || e); }
-    if (data && i === 0) username = data.currentUser ? data.currentUser.displayName || data.currentUser.login : null;
+    assertSession(generation);
+    if (data && i === 0) {
+      const user = data.currentUser;
+      if (user && user.login) {
+        const id = String(user.id || '');
+        adoptVerifiedAccount(/^[1-9][0-9]*$/.test(id) ? 'id:' + id : 'login:' + user.login.toLowerCase());
+        username = user.displayName || user.login;
+      } else {
+        username = null;
+        verifiedAccountGeneration = -1;
+        verifiedTokenDigest = null;
+      }
+    }
     part.forEach((slug, j) => {
       const s = status.get(slug) || { watchedMs: 0 };
       const u = data && data[`c${j}`];
@@ -538,55 +629,80 @@ async function refreshAll() {
       if (claim && claim !== s.claim) fresh.push(slug);
       s.claim = claim || null;
       const p = cp ? cp.balance : null;
-      if (typeof p === 'number') {
-        if (s.points != null && p > s.points) {
-          s.gainedTotal = (s.gainedTotal || 0) + (p - s.points);
-          if (watchers.has(slug)) s.lastGainAt = Date.now();
-          addDaily(p - s.points);
-        }
-        if (s.points != null && p < s.points) registerDrop(slug, s, s.points - p);
-        s.points = p;
-        checkBonus(slug, s);
-      }
+      if (verifiedAccountGeneration !== generation) { s.points = null; s.bonusTier = null; s.targetTier = null; }
+      updateChannelBalance(slug, s, p);
       status.set(slug, s);
     });
   }
   // Baú de bônus: com "Pegar baú sozinho" o app clica nele; sem isso, um aviso só para todos os
   // canais, no máximo a cada 15 min, e a pessoa abre e clica.
-  if (config.autoChest && loggedIn) {
-    for (const slug of config.channels) if ((status.get(slug) || {}).claim) queueChest(slug);
-  } else if (fresh.length && config.notifyChest && Date.now() - chestNotifiedAt > 15 * 60 * 1000) {
+  if (!config.autoChest && fresh.length && config.notifyChest && Date.now() - chestNotifiedAt > 15 * 60 * 1000) {
     chestNotifiedAt = Date.now();
     const names = fresh.map((slug) => (status.get(slug) || {}).displayName || slug);
     notify(`🎁 Baú de bônus em ${names.slice(0, 3).join(', ')}${names.length > 3 ? '…' : ''}`, 'Clique para abrir o chat e pegar os pontos extras.', () => openStore(fresh[0]));
   }
 }
 
-// Pega o baú de bônus: abre o chat do canal numa janela escondida, espera o botão do baú
-// aparecer (o mesmo que você clicaria ao lado do saldo), clica uma vez e fecha. Não gasta pontos.
-// Os baús vão numa fila, um de cada vez: várias janelas de chat abrindo juntas deixavam a página
-// lenta e o botão não aparecia a tempo. Cada tentativa fica em chest-log.jsonl (pasta de dados).
+function updateChannelBalance(slug, s, points) {
+  if (typeof points !== 'number' || !Number.isFinite(points)) return;
+  if (s.points != null && points > s.points) {
+    s.gainedTotal = (s.gainedTotal || 0) + points - s.points;
+    if (watchers.has(slug)) s.lastGainAt = Date.now();
+    addDaily(points - s.points);
+  }
+  if (s.points != null && points < s.points) registerDrop(slug, s, s.points - points);
+  s.points = points;
+  checkBonus(slug, s);
+}
+
+// Only the platform's bonus button is clicked; rewards are never selected.
+// Account data is checked again through read-only API calls before recording success.
 const chestQueue = [];
+const chestWindows = new Set();
+const confirmedChestClaims = new Set();
 let chestBusy = null;
 const lastClaimTry = new Map();
 const CHEST_RETRY_MS = 90 * 1000;
+const FIND_CHEST = slug => chestClickScript(`${TWITCH}/popout/${slug}/chat?popout=`);
+
+function assertChestOwner(owner) {
+  if (!config.autoChest || sessionTransition || !loggedIn || sessionChecking
+    || verifiedAccountGeneration !== apiClient.generation || config.reportAccount !== owner.account
+    || !owner.digest || verifiedTokenDigest !== owner.digest) throw new Error('Session changed');
+}
+
+async function waitForChestOwner(owner) {
+  // Give the selected-cookie read the same bounded budget as an API request.
+  // No account work is accepted while verification is pending.
+  for (let elapsed = 0; elapsed < 20000 && sessionChecking && !sessionTransition; elapsed += 25) await new Promise(resolve => setTimeout(resolve, 25));
+  assertChestOwner(owner);
+}
+
+function queueAvailableChests() {
+  if (!config.autoChest || !loggedIn || sessionChecking || sessionTransition || verifiedAccountGeneration !== apiClient.generation) return;
+  for (const slug of config.channels) if ((status.get(slug) || {}).claim) queueChest(slug);
+  void runChestQueue();
+}
 
 function queueChest(slug) {
-  if (chestBusy === slug || chestQueue.includes(slug) || Date.now() - (lastClaimTry.get(slug) || 0) < CHEST_RETRY_MS) return;
+  const claim = (status.get(slug) || {}).claim;
+  if (!claim || confirmedChestClaims.has(claim) || chestBusy === slug || chestQueue.includes(slug)
+    || Date.now() - (lastClaimTry.get(slug) || 0) < CHEST_RETRY_MS) return;
   chestQueue.push(slug);
-  runChestQueue();
+  void runChestQueue();
 }
 
 async function runChestQueue() {
-  if (chestBusy) return;
+  if (chestBusy || !config.autoChest || sessionChecking || !loggedIn) return;
   const slug = chestQueue.shift();
   if (!slug) return;
+  if (!config.channels.includes(slug) || !(status.get(slug) || {}).claim) { void runChestQueue(); return; }
   chestBusy = slug;
   send('status', snapshot());
   try { await claimChest(slug); } catch {}
   chestBusy = null;
   send('status', snapshot());
-  runChestQueue();
+  void runChestQueue();
 }
 
 function chestLog(entry) {
@@ -597,58 +713,80 @@ function chestLog(entry) {
   } catch {}
 }
 
-// Procura o botão do baú do jeito mais firme possível: o ícone do baú, ou um botão do resumo de
-// pontos com nome de "resgatar/claim". Devolve o que achou para o registro.
-const FIND_CHEST = `new Promise((done) => {
-  let n = 0;
-  const find = () => {
-    const icon = document.querySelector('.claimable-bonus__icon');
-    if (icon && icon.closest('button')) return icon.closest('button');
-    const box = document.querySelector('[data-test-selector="community-points-summary"]');
-    const buttons = [...(box || document).querySelectorAll('button')];
-    return buttons.find((b) => /claim bonus|resgatar b[oô]nus|coletar|claim/i.test(b.getAttribute('aria-label') || ''));
-  };
-  const t = setInterval(() => {
-    const btn = find();
-    if (btn) { clearInterval(t); btn.click(); return done({ ok: true, tries: n, label: btn.getAttribute('aria-label') || '' }); }
-    if (++n > 80) {
-      clearInterval(t);
-      const box = document.querySelector('[data-test-selector="community-points-summary"]');
-      done({ ok: false, tries: n, summary: !!box, labels: box ? [...box.querySelectorAll('button')].map((b) => b.getAttribute('aria-label') || '').slice(0, 5) : [], url: location.href });
+async function confirmChestClaim(slug, claim, before, owner) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await waitForChestOwner(owner);
+    let response;
+    try { response = await gql(`query ChestClaimConfirmation{currentUser{id login} channel:user(login:${JSON.stringify(slug)}){channel{self{communityPoints{balance availableClaim{id}}}}}}`); }
+    catch (error) {
+      await waitForChestOwner(owner);
+      if (error.message === 'Session changed' && attempt < 4) continue;
+      throw error;
     }
-  }, 500);
-})`;
+    await waitForChestOwner(owner);
+    const { status: code, json } = response;
+    const user = json?.data?.currentUser;
+    const id = String(user?.id || '');
+    const account = /^[1-9][0-9]*$/.test(id) ? 'id:' + id : user?.login ? 'login:' + user.login.toLowerCase() : null;
+    if (code !== 200 || !user || account !== owner.account || json.errors?.length) throw new Error('Confirmation failed');
+    const points = json.data.channel?.channel?.self?.communityPoints;
+    const noLongerAvailable = points && Object.prototype.hasOwnProperty.call(points, 'availableClaim')
+      && (points.availableClaim === null || (typeof points.availableClaim?.id === 'string' && points.availableClaim.id !== claim));
+    if (noLongerAvailable && typeof points.balance === 'number' && points.balance >= before + 50) return points.balance;
+    if (attempt < 4) await new Promise(resolve => setTimeout(resolve, 750));
+  }
+  throw new Error('Claim not confirmed');
+}
 
 async function claimChest(slug) {
+  const owner = { account: config.reportAccount, digest: verifiedTokenDigest };
+  assertChestOwner(owner);
+  const initial = status.get(slug);
+  const claim = initial?.claim;
+  if (!claim || typeof initial.points !== 'number' || confirmedChestClaims.has(claim)) return false;
+  const before = initial.points;
   lastClaimTry.set(slug, Date.now());
+  initial.chestError = null;
   const started = Date.now();
   const win = new BrowserWindow({
     width: 400, height: 640, x: 0, y: 0, show: false, skipTaskbar: true, focusable: false, type: 'toolbar', opacity: 0,
     webPreferences: { partition: PARTITION, backgroundThrottling: false, spellcheck: false },
   });
   win.webContents.setAudioMuted(true);
-  // Como as lives ocultas: a janela existe na tela (transparente e sem cliques), para a página
-  // da Twitch se comportar como uma aba aberta.
+  chestWindows.add(win);
   win.setIgnoreMouseEvents(true);
   if (!isLinux) win.showInactive();
   let result = { ok: false };
   try {
     await withTimeout(win.loadURL(`${TWITCH}/popout/${slug}/chat?popout=`), 45 * 1000);
-    result = await withTimeout(win.webContents.executeJavaScript(FIND_CHEST), 50 * 1000);
-    if (result.ok) {
-      await new Promise((r) => setTimeout(r, 3000)); // deixa a Twitch confirmar antes de fechar
-      const s = status.get(slug) || {};
-      s.claim = null;
-      config.chestsClaimed = (config.chestsClaimed || 0) + 1;
-      config.chestDaily = config.chestDaily || {};
-      const k = dayKey(Date.now());
-      config.chestDaily[k] = (config.chestDaily[k] || 0) + 1;
-      configDirty = true;
-      send('toast', `🎁 Baú pego em ${s.displayName || slug}: +50 pts`);
-    }
-  } catch (e) {
-    result = { ok: false, error: String(e.message || e) };
+    await waitForChestOwner(owner);
+    const clicked = await withTimeout(win.webContents.executeJavaScript(FIND_CHEST(slug), true), 50 * 1000);
+    await waitForChestOwner(owner);
+    if (!clicked?.clicked) throw new Error(clicked?.reason === 'bonus-button-unavailable' ? 'Bonus unavailable' : 'Bonus button not found');
+    await confirmChestClaim(slug, claim, before, owner);
+    await waitForChestOwner(owner);
+    const current = status.get(slug);
+    if (!current) throw new Error('Session changed');
+    if (current.claim === claim) current.claim = null;
+    current.chestError = null;
+    confirmedChestClaims.add(claim);
+    if (confirmedChestClaims.size > 256) confirmedChestClaims.delete(confirmedChestClaims.values().next().value);
+    config.chestsClaimed = (config.chestsClaimed || 0) + 1;
+    config.chestDaily = config.chestDaily || {};
+    const key = dayKey(Date.now());
+    config.chestDaily[key] = (config.chestDaily[key] || 0) + 1;
+    configDirty = false;
+    saveConfig();
+    send('toast', `🎁 Baú confirmado em ${current.displayName || slug}`);
+    result = { ok: true };
+    void poll();
+  } catch (error) {
+    const code = ['Session changed', 'Bonus unavailable', 'Bonus button not found', 'Claim not confirmed', 'Confirmation failed', 'timeout'].includes(error.message) ? error.message : 'Claim failed';
+    result = { ok: false, error: code, sameAccount: config.reportAccount === owner.account, sameCachedToken: verifiedTokenDigest === owner.digest, accountVerified: loggedIn && verifiedAccountGeneration === apiClient.generation, sessionChecking };
+    const current = status.get(slug);
+    if (current && config.reportAccount === owner.account && current.claim === claim && config.autoChest) current.chestError = code;
   } finally {
+    chestWindows.delete(win);
     if (!win.isDestroyed()) win.destroy();
   }
   chestLog({ slug, ms: Date.now() - started, ...result });
@@ -738,15 +876,23 @@ function syncChat() {
 
 // Envio: uma conexão com a sua conta, aberta na primeira mensagem que você manda.
 async function sendChat(slug, content) {
+  const generation = apiClient.generation;
+  if (sessionTransition) return { ok: false, message: 'Session changed' };
   const token = await authToken();
+  if (sessionTransition || generation !== apiClient.generation) return { ok: false, message: 'Session changed' };
   if (!token || !username) return { ok: false, message: 'faça login na Twitch' };
   const login = String(username).toLowerCase();
-  if (!ircSend || ircSend.readyState > 1 || ircSend.login !== login) {
+  if (!ircSend || ircSend.readyState > 1 || ircSend.login !== login || ircSend.generation !== generation) {
+    if (ircSend) { try { ircSend.close(); } catch {} }
     const ws = new WebSocket('wss://irc-ws.chat.twitch.tv:443');
     ws.login = login;
+    ws.generation = generation;
     ircSend = ws;
     ws.ready = new Promise((resolve, reject) => {
-      ws.onopen = () => { ws.send(`PASS oauth:${token}`); ws.send(`NICK ${login}`); };
+      ws.onopen = () => {
+        if (generation !== apiClient.generation || sessionTransition || ircSend !== ws) { try { ws.close(); } catch {} reject(new Error('Session changed')); return; }
+        ws.send(`PASS oauth:${token}`); ws.send(`NICK ${login}`);
+      };
       ws.onmessage = (e) => {
         for (const line of String(e.data).split('\r\n')) {
           if (line.startsWith('PING')) ws.send(line.replace('PING', 'PONG'));
@@ -758,12 +904,16 @@ async function sendChat(slug, content) {
       setTimeout(() => reject(new Error('timeout')), 10 * 1000);
     });
   }
+  const socket = ircSend;
   try {
-    await ircSend.ready;
-    ircSend.send(`PRIVMSG #${slug} :${String(content).replace(/[\r\n]+/g, ' ').slice(0, 500)}`);
+    await socket.ready;
+    assertSession(generation);
+    if (ircSend !== socket) throw new Error('Session changed');
+    socket.send(`PRIVMSG #${slug} :${String(content).replace(/[\r\n]+/g, ' ').slice(0, 500)}`);
     return { ok: true };
   } catch (e) {
-    ircSend = null;
+    if (ircSend === socket) ircSend = null;
+    try { socket.close(); } catch {}
     return { ok: false, message: e.message };
   }
 }
@@ -862,6 +1012,7 @@ function openStore(slug, title = `Pontos — ${slug}`) {
   win.loadURL(`${TWITCH}/popout/${slug}/chat?popout=`);
   win.on('page-title-updated', (e) => e.preventDefault());
   win.on('closed', () => {
+    if (storeWindows.get(slug) !== win) return;
     storeWindows.delete(slug);
     poll();
     if (storeSequence && storeSequence.current === slug) openNextStore();
@@ -883,7 +1034,9 @@ function openNextStore() {
 
 // Confere cada live oculta: aviso de conteúdo adulto (só a pessoa pode confirmar) e estado do player.
 async function checkPlayers() {
+  const generation = apiClient.generation;
   for (const [slug, win] of watchers) {
+    if (sessionTransition || generation !== apiClient.generation) return;
     const s = status.get(slug);
     if (!s || win.isDestroyed() || userOpened.has(win)) continue;
     const info = await withTimeout(win.webContents.executeJavaScript(`(() => {
@@ -895,12 +1048,13 @@ async function checkPlayers() {
     })()`), PLAYER_CHECK_MS).catch((err) => {
       // Página lenta (PC fraco, Linux sem aceleração) não é página travada: só fecha depois de
       // 3 checagens seguidas sem resposta e nunca nos primeiros 3 min da live.
-      if (err.message !== 'timeout' || watchers.get(slug) !== win) return null;
+      if (sessionTransition || generation !== apiClient.generation || err.message !== 'timeout' || watchers.get(slug) !== win || status.get(slug) !== s) return null;
       s.playerTimeouts = (s.playerTimeouts || 0) + 1;
       if (s.playerTimeouts >= 3 && Date.now() - (s.watchingSince || 0) > 3 * 60 * 1000) { s.playerTimeouts = 0; stopWatcher(slug); }
       return null;
     });
-    if (!info) continue;
+    if (sessionTransition || generation !== apiClient.generation) return;
+    if (!info || watchers.get(slug) !== win || status.get(slug) !== s) continue;
     s.playerTimeouts = 0;
     s.ageGate = info.gate;
     s.video = info.video;
@@ -983,6 +1137,7 @@ const isShown = (slug) => { const w = watchers.get(slug); return !!w && !w.isDes
 const RECYCLE_MS = 6 * 60 * 60 * 1000;
 
 function reconcileWatchers() {
+  if (config.farming && sessionChecking && !process.env.TWITCHTERINO_ALLOW_ANON) return;
   const now = Date.now();
   const canFarm = config.farming && (loggedIn || process.env.TWITCHTERINO_ALLOW_ANON);
   for (const slug of [...watchers.keys()]) {
@@ -994,14 +1149,14 @@ function reconcileWatchers() {
 
   for (const slug of [...watchers.keys()]) {
     if (isShown(slug)) continue;
-    const idle = loggedIn && !limitTest && config.maxWatchers <= 2 && earningState(slug, now) === 'idle';
+    const idle = !config.watchAll && loggedIn && !limitTest && config.maxWatchers <= 2 && earningState(slug, now) === 'idle';
     const s = status.get(slug);
     if (idle && s) s.cooldownUntil = now + IDLE_COOLDOWN_MS;
     if (idle || turnTime(slug, now) >= RECYCLE_MS) stopWatcher(slug);
   }
 
   const rotatable = () => [...watchers.keys()].filter((slug) => !isShown(slug)).sort((a, b) => turnTime(b, now) - turnTime(a, now));
-  while (watchers.size > config.maxWatchers && rotatable().length) stopWatcher(rotatable()[0]);
+  while (!config.watchAll && watchers.size > config.maxWatchers && rotatable().length) stopWatcher(rotatable()[0]);
 
   const focusInfo = (slug) => {
     const s = status.get(slug) || {};
@@ -1009,7 +1164,11 @@ function reconcileWatchers() {
     return { points: s.points, rewards: s.rewards, cooling, sub: !!s.subscribed && !cooling, bonus: hasBonus(s) };
   };
   const byGoal = (a, b) => compareGoal(focusInfo(a), focusInfo(b));
-  const waiting = config.channels.filter((slug) => !watchers.has(slug) && (status.get(slug) || {}).live && (status.get(slug) || {}).pointsEnabled !== false);
+  const waiting = config.channels.filter((slug) => !watchers.has(slug) && (status.get(slug) || {}).live && (config.watchAll || (status.get(slug) || {}).pointsEnabled !== false));
+  if (config.watchAll) {
+    for (const slug of waiting) startWatcher(slug);
+    return;
+  }
   if (config.rotation) waiting.sort(byGoal);
   while (watchers.size < config.maxWatchers && waiting.length) startWatcher(waiting.shift());
   if (!config.rotation) return;
@@ -1093,28 +1252,29 @@ function limitTestSnapshot() {
 
 function snapshot() {
   const now = Date.now();
+  const confirmedAccount = loggedIn && verifiedAccountGeneration === apiClient.generation;
   return {
-    farming: config.farming, maxWatchers: config.maxWatchers, lowQuality: config.lowQuality, rotation: config.rotation,
+    farming: config.farming, watchAll: !!config.watchAll, maxWatchers: config.maxWatchers, lowQuality: config.lowQuality, rotation: config.rotation,
     bonusTarget: config.bonusTarget, bonusOptions: bonusOptions(), limitTest: limitTestSnapshot(), limitResult: config.limitResult || null,
     openAtLogin: isOpenAtLogin(), platform: process.platform,
     notifyBonus: config.notifyBonus, notifyChest: config.notifyChest, autoChest: config.autoChest, chestsToday: (config.chestDaily || {})[dayKey(now)] || 0, notifyChat: config.notifyChat, sleepMode: config.sleepMode,
-    favorites: config.favorites, username, version: app.getVersion(),
+    favorites: config.favorites, username: confirmedAccount ? username : null, sessionChecking, version: app.getVersion(),
     intro: config.lastSeenVersion === app.getVersion() ? null : (firstRun ? 'welcome' : 'news'),
-    bonuses: activeBonuses(now),
-    today: config.daily[dayKey(now)] || 0,
-    purchases: [...config.purchases].sort((a, b) => b.t - a.t).slice(0, 6),
+    bonuses: confirmedAccount ? activeBonuses(now) : [],
+    today: confirmedAccount ? config.daily[dayKey(now)] || 0 : 0,
+    purchases: confirmedAccount ? [...config.purchases].sort((a, b) => b.t - a.t).slice(0, 6) : [],
     storeSequence: storeSequence ? { done: storeSequence.done, total: storeSequence.total } : null,
     channels: config.channels.map((slug) => {
       const s = status.get(slug) || {};
-      const known = s.points != null;
+      const known = confirmedAccount && s.points != null;
       const rank = known ? goalRank(s) : null;
       return {
         slug, displayName: s.displayName || slug, avatar: s.avatar || null, live: !!s.live, viewers: s.viewers || 0, title: s.title || '',
-        chatroomId: s.displayName ? slug : null, points: s.points ?? null,
+        chatroomId: s.displayName ? slug : null, points: confirmedAccount ? s.points ?? null : null,
         watching: watchers.has(slug), ageGate: !!s.ageGate, earning: earningState(slug, now),
         following: s.following ?? null, subscribed: !!s.subscribed, multiplier: s.multiplier || 1,
-        gained: s.gainedTotal || 0, goal: rank ? rank.goal : null, goalLeft: rank ? rank.left : null,
-        costs: costsOf(s), targetCost: targetCost(s), hasBonus: hasBonus(s), rewardsLoaded: !!s.rewards, chest: !!s.claim, chestState: chestBusy === slug ? 'claiming' : chestQueue.includes(slug) ? 'queued' : null,
+        gained: confirmedAccount ? s.gainedTotal || 0 : 0, goal: rank ? rank.goal : null, goalLeft: rank ? rank.left : null,
+        costs: costsOf(s), targetCost: targetCost(s), hasBonus: hasBonus(s), rewardsLoaded: !!s.rewards, chest: !!s.claim, chestState: chestBusy === slug ? 'claiming' : chestQueue.includes(slug) ? 'queued' : config.autoChest && s.chestError && s.claim ? 'retry' : null, chestError: s.chestError || null,
         rewards: (s.rewards || []).filter((r) => r.available).map((r) => ({ kind: r.kind, hours: r.hours, cost: r.cost })),
         priceChange: s.priceChange && now - s.priceChange.at < DAY_MS ? s.priceChange.text : null,
         pointsEnabled: s.pointsEnabled !== false,
@@ -1129,26 +1289,39 @@ function snapshot() {
 const POLL_STUCK_MS = 5 * 60 * 1000;
 let polling = false;
 let pollStartedAt = 0;
+let pollingGeneration = -1;
+let pollSequence = 0;
 let loggedIn = false;
 const step = (...a) => { if (process.env.TWITCHTERINO_DEBUG) console.log('STEP', new Date().toISOString().slice(11, 19), ...a); };
 async function poll() {
-  if (polling && Date.now() - pollStartedAt < POLL_STUCK_MS) return;
+  if (sessionTransition || cookieCheckPending) return;
+  const generation = apiClient.generation;
+  if (polling && pollingGeneration === generation && Date.now() - pollStartedAt < POLL_STUCK_MS) return;
   const startedAt = Date.now();
+  const cycle = ++pollSequence;
   polling = true;
+  pollingGeneration = generation;
   pollStartedAt = startedAt;
   try {
-    loggedIn = !!(await authToken());
-    await withTimeout(apiReady, 5 * 1000);
+    const token = await authToken();
+    assertSession(generation);
+    if (token && verifiedAccountGeneration !== generation) sessionChecking = true;
     step('consulta');
     await refreshAll();
+    assertSession(generation);
     step('consulta ok', [...status.values()].filter((s) => s.live).length, 'ao vivo');
-    if (!loggedIn) username = null;
+    loggedIn = !!token && verifiedAccountGeneration === generation;
+    sessionChecking = false;
+    if (loggedIn) verifiedTokenDigest = tokenDigest(token);
+    if (!token) { username = null; verifiedTokenDigest = null; }
+    queueAvailableChests();
     if (configDirty) { configDirty = false; saveConfig(); }
     if (config.channels.length && config.channels.every((slug) => (status.get(slug) || {}).error) && !apiWin.isVisible()) loadApi(LIGHT_URL);
     advanceLimitTest();
     reconcileWatchers();
     step('lives', watchers.size);
     await checkPlayers();
+    assertSession(generation);
     step('players ok');
     logHistory();
     send('status', snapshot());
@@ -1163,7 +1336,12 @@ async function poll() {
   } catch (e) {
     if (process.env.TWITCHTERINO_DEBUG) console.log("POLL ERROR", e && e.stack);
     // Twitch ou internet fora do ar: a próxima rodada tenta de novo.
-  } finally { if (pollStartedAt === startedAt) polling = false; }
+    if (generation === apiClient.generation && !cookieCheckPending && verifiedAccountGeneration !== generation) {
+      sessionChecking = false;
+      loggedIn = false;
+      send('status', snapshot());
+    }
+  } finally { if (pollSequence === cycle) polling = false; }
 }
 
 // ---------- Modo 24/7 ----------
@@ -1231,56 +1409,60 @@ function recoverAfterResume() {
   setTimeout(poll, 15 * 1000);
 }
 
-const UPDATE_CHECK_MS = 6 * 60 * 60 * 1000;
-function setupAutoUpdate() {
-  if (!app.isPackaged || process.env.PORTABLE_EXECUTABLE_FILE || (isLinux && !process.env.APPIMAGE)) return;
-  const check = () => autoUpdater.checkForUpdatesAndNotify().catch(() => {});
-  autoUpdater.on('error', () => {});
-  check();
-  setInterval(check, UPDATE_CHECK_MS);
-}
+// Automatic updates remain disabled until the maintained fork has a validated signing policy.
 
-ipcMain.handle('state:get', () => snapshot());
-ipcMain.handle('channels:add', async (_e, slug) => {
+const handleIpc = createIpcRegistrar({
+  ipcMain, getMainWindow: () => mainWin, uiDocument: UI_DOCUMENT, platform: 'twitch',
+  getContext: () => ({ channels: config.channels, chatroomIds: [], viewport: mainWin.getContentSize() }),
+});
+
+handleIpc('state:get', () => snapshot());
+handleIpc('channels:add', async (_e, slug) => {
   slug = String(slug || '').trim().toLowerCase().replace(/^https?:\/\/(www\.)?twitch\.tv\//, '').replace(/[^a-z0-9_]/g, '');
   if (LOGIN_RE.test(slug) && !config.channels.includes(slug)) { config.channels.push(slug); saveConfig(); syncChat(); poll(); }
   return snapshot();
 });
-ipcMain.handle('channels:remove', (_e, slug) => {
+handleIpc('channels:remove', (_e, slug) => {
   config.channels = config.channels.filter((c) => c !== slug);
   stopWatcher(slug); status.delete(slug); saveConfig(); syncChat();
   return snapshot();
 });
-ipcMain.handle('farming:set', (_e, on) => { setFarming(on); return snapshot(); });
-ipcMain.handle('autostart:set', (_e, on) => { try { setOpenAtLogin(!!on); } catch {} return snapshot(); });
-ipcMain.handle('app:quit', quitApp);
-ipcMain.handle('notifyBonus:set', (_e, on) => { config.notifyBonus = !!on; saveConfig(); return snapshot(); });
-ipcMain.handle('notifyChest:set', (_e, on) => { config.notifyChest = !!on; saveConfig(); return snapshot(); });
-ipcMain.handle('autoChest:set', (_e, on) => { config.autoChest = !!on; saveConfig(); if (on) poll(); return snapshot(); });
-ipcMain.handle('notifyChat:set', (_e, on) => { config.notifyChat = !!on; saveConfig(); return snapshot(); });
-ipcMain.handle('sleepMode:set', (_e, on) => { config.sleepMode = !!on; saveConfig(); return snapshot(); });
-ipcMain.handle('favorite:toggle', (_e, slug) => {
+handleIpc('farming:set', (_e, on) => { setFarming(on); return snapshot(); });
+handleIpc('watchAll:set', (_e, on) => { stopLimitTest(); config.watchAll = on; saveConfig(); reconcileWatchers(); return snapshot(); });
+handleIpc('autostart:set', (_e, on) => { try { setOpenAtLogin(!!on); } catch {} return snapshot(); });
+handleIpc('app:quit', quitApp);
+handleIpc('notifyBonus:set', (_e, on) => { config.notifyBonus = !!on; saveConfig(); return snapshot(); });
+handleIpc('notifyChest:set', (_e, on) => { config.notifyChest = !!on; saveConfig(); return snapshot(); });
+handleIpc('autoChest:set', (_e, on) => {
+  config.autoChest = on; saveConfig();
+  if (on) { queueAvailableChests(); void poll(); }
+  else { chestQueue.length = 0; for (const win of chestWindows) if (!win.isDestroyed()) win.destroy(); }
+  return snapshot();
+});
+handleIpc('notifyChat:set', (_e, on) => { config.notifyChat = !!on; saveConfig(); return snapshot(); });
+handleIpc('sleepMode:set', (_e, on) => { config.sleepMode = !!on; saveConfig(); return snapshot(); });
+handleIpc('favorite:toggle', (_e, slug) => {
   if (!config.channels.includes(slug)) return snapshot();
   config.favorites = config.favorites.includes(slug) ? config.favorites.filter((s) => s !== slug) : [...config.favorites, slug];
   saveConfig();
   return snapshot();
 });
-ipcMain.handle('purchase:add', (_e, kind) => {
+handleIpc('purchase:add', (_e, kind) => {
   if (KIND[kind]) { addPurchase({ t: Date.now(), kind, hours: 1, slug: null }); saveConfig(); configDirty = false; }
   updateTray();
   return snapshot();
 });
-ipcMain.handle('purchase:remove', (_e, t) => { config.purchases = config.purchases.filter((p) => p.t !== t); saveConfig(); updateTray(); return snapshot(); });
-ipcMain.handle('stores:sequence', (_e, slugs) => {
+handleIpc('purchase:remove', (_e, t) => { config.purchases = config.purchases.filter((p) => p.t !== t); saveConfig(); updateTray(); return snapshot(); });
+handleIpc('stores:sequence', (_e, slugs) => {
   const queue = (Array.isArray(slugs) ? slugs : []).filter((s) => config.channels.includes(s));
   if (!queue.length) return snapshot();
   storeSequence = { queue, total: queue.length, done: 0, current: null };
   openNextStore();
   return snapshot();
 });
-ipcMain.handle('stores:cancel', () => { if (storeSequence) storeSequence.queue = []; return snapshot(); });
-ipcMain.handle('report:get', () => weeklyReport());
-ipcMain.handle('report:save', async (_e, rect) => {
+handleIpc('stores:cancel', () => { if (storeSequence) storeSequence.queue = []; return snapshot(); });
+handleIpc('report:get', () => weeklyReport());
+handleIpc('report:save', async (_e, rect) => {
   const r = { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) };
   const image = await mainWin.webContents.capturePage(r);
   const { canceled, filePath } = await dialog.showSaveDialog(mainWin, {
@@ -1292,13 +1474,13 @@ ipcMain.handle('report:save', async (_e, rect) => {
   fs.writeFileSync(filePath, image.toPNG());
   return filePath;
 });
-ipcMain.handle('intro:done', () => { config.lastSeenVersion = app.getVersion(); firstRun = false; saveConfig(); return snapshot(); });
-ipcMain.handle('maxWatchers:set', (_e, n) => {
+handleIpc('intro:done', () => { config.lastSeenVersion = app.getVersion(); firstRun = false; saveConfig(); return snapshot(); });
+handleIpc('maxWatchers:set', (_e, n) => {
   limitTest = null;
   config.maxWatchers = Math.max(1, Math.min(LIMIT_MAX, Number(n) || 1)); saveConfig(); reconcileWatchers(); return snapshot();
 });
-ipcMain.handle('rotation:set', (_e, on) => { limitTest = null; config.rotation = !!on; saveConfig(); reconcileWatchers(); return snapshot(); });
-ipcMain.handle('bonusTarget:set', (_e, value) => {
+handleIpc('rotation:set', (_e, on) => { limitTest = null; config.rotation = !!on; saveConfig(); reconcileWatchers(); return snapshot(); });
+handleIpc('bonusTarget:set', (_e, value) => {
   const t = parseTarget(value);
   config.bonusTarget = t && HOURS.includes(t.hours) ? `${t.kind}:${t.hours}` : '';
   for (const st of status.values()) { st.targetTier = null; st.bonusTier = null; } // a referência dos avisos recomeça
@@ -1306,44 +1488,58 @@ ipcMain.handle('bonusTarget:set', (_e, value) => {
   reconcileWatchers();
   return snapshot();
 });
-ipcMain.handle('limitTest:start', () => {
-  if (!loggedIn) return snapshot();
+handleIpc('limitTest:start', () => {
+  if (!loggedIn || config.watchAll) return snapshot();
   startLimitTest(); reconcileWatchers(); return snapshot();
 });
-ipcMain.handle('limitTest:stop', () => { stopLimitTest(); reconcileWatchers(); return snapshot(); });
-ipcMain.handle('lowQuality:set', (_e, on) => {
+handleIpc('limitTest:stop', () => { stopLimitTest(); reconcileWatchers(); return snapshot(); });
+handleIpc('lowQuality:set', (_e, on) => {
   config.lowQuality = !!on; saveConfig();
   for (const win of watchers.values()) if (!win.isDestroyed() && !userOpened.has(win)) win.webContents.reload();
   return snapshot();
 });
-ipcMain.handle('refresh', async () => { await poll(); return snapshot(); });
-ipcMain.handle('login:show', async () => {
+handleIpc('refresh', async () => { await poll(); return snapshot(); });
+handleIpc('login:show', async () => {
   apiWin.show(); apiWin.focus();
   await loadApi(`${TWITCH}/login`);
 });
-ipcMain.handle('logout', async () => {
+handleIpc('logout', async () => {
   const { response } = await dialog.showMessageBox(mainWin, {
     type: 'question', buttons: ['Sair da conta', 'Cancelar'], defaultId: 1, cancelId: 1,
     title: 'Sair da conta', message: 'Sair da conta da Twitch neste PC?',
     detail: 'Os dados de login salvos no app serão apagados. Para juntar pontos de novo, será preciso entrar outra vez.',
   });
   if (response !== 0) return snapshot();
-  for (const slug of [...watchers.keys()]) stopWatcher(slug);
-  for (const win of storeWindows.values()) if (!win.isDestroyed()) win.close();
-  if (ircSend) { try { ircSend.close(); } catch {} ircSend = null; }
-  const ses = session.fromPartition(PARTITION);
-  await ses.clearStorageData();
-  await ses.clearCache();
-  await ses.clearAuthCache();
-  ses.flushStorageData();
-  status.clear();
-  username = null;
-  await loadApi(LIGHT_URL);
-  await poll();
+  sessionTransition = true;
+  clearTimeout(authRefreshTimer);
+  authRefreshTimer = null;
+  verifiedTokenDigest = null;
+  sessionChecking = false;
+  cookieCheckPending = false;
+  apiClient.suspend();
+  try {
+    apiWin.webContents.stop();
+    resetAccountRuntime();
+    verifiedAccountGeneration = -1;
+    if (ircSend) { try { ircSend.close(); } catch {} ircSend = null; }
+    const ses = session.fromPartition(PARTITION);
+    await ses.clearStorageData();
+    await ses.clearCache();
+    await ses.clearAuthCache();
+    ses.flushStorageData();
+    status.clear();
+    username = null;
+    loggedIn = false;
+    loadApi(LIGHT_URL);
+  } finally {
+    sessionTransition = false;
+    apiClient.resume();
+  }
+  setTimeout(poll, 0);
   return snapshot();
 });
-ipcMain.handle('store:open', (_e, slug) => openStore(slug));
-ipcMain.handle('channel:show', (_e, slug) => {
+handleIpc('store:open', (_e, slug) => openStore(slug));
+handleIpc('channel:show', (_e, slug) => {
   let win = watchers.get(slug);
   if (!win) { startWatcher(slug); win = watchers.get(slug); }
   userOpened.add(win);
@@ -1353,12 +1549,11 @@ ipcMain.handle('channel:show', (_e, slug) => {
   win.setFocusable(true);
   win.setSize(960, 600); win.center();
   win.show(); win.focus();
-  win.webContents.reload();
   const s = status.get(slug);
   if (s) s.ageGate = false;
   send('status', snapshot());
 });
-ipcMain.handle('chat:send', (_e, { chatroomId, content }) => sendChat(chatroomId, content));
+handleIpc('chat:send', (_e, { chatroomId, content }) => sendChat(chatroomId, content));
 
 if (!app.requestSingleInstanceLock()) app.quit();
 app.on('second-instance', showMain);
@@ -1371,7 +1566,7 @@ app.whenReady().then(() => {
     width: 1380, height: 840, minWidth: 820, minHeight: 560, backgroundColor: '#0b0716', title: 'Twitchterino',
     show: !process.argv.includes('--hidden'),
     icon: path.join(__dirname, 'build', 'icon.png'),
-    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, sandbox: true, nodeIntegration: false },
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, sandbox: true, nodeIntegration: false, additionalArguments: ['--app-ui-url=' + UI_DOCUMENT] },
   });
   mainWin.setMenuBarVisibility(false);
   mainWin.loadFile(path.join(__dirname, 'renderer', 'index.html'));
@@ -1393,7 +1588,6 @@ app.whenReady().then(() => {
   createTray();
   syncKeepAwake();
   powerMonitor.on('resume', recoverAfterResume);
-  setupAutoUpdate();
   createApiWindow();
   connectChat();
   apiReady.then(poll);

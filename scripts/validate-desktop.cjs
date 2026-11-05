@@ -1,0 +1,299 @@
+'use strict';
+// Desktop validation uses an isolated empty profile. It never supplies credentials.
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const net = require('node:net');
+const { spawn, spawnSync } = require('node:child_process');
+const pkg = require('../package.json');
+
+const options = Object.fromEntries(process.argv.slice(2).map(arg => {
+  const index = arg.indexOf('=');
+  return index < 0 ? [arg.replace(/^--/, ''), true] : [arg.slice(2, index), arg.slice(index + 1)];
+}));
+const windows = process.platform === 'win32';
+if (!windows && !options['allow-non-windows']) throw new Error('Run the Windows validation on native Windows.');
+const root = path.resolve(__dirname, '..');
+const executable = path.resolve(options.executable || path.join(root, 'dist', 'win-unpacked', pkg.productName + '.exe'));
+const output = path.resolve(options.output || 'validation-output/evidence');
+const namespace = pkg.name === 'twitchterino' ? 'tt' : 'kick';
+const platformHost = pkg.name === 'twitchterino' ? 'twitch.tv' : 'kick.com';
+const variable = pkg.name === 'twitchterino' ? 'TWITCHTERINO_DATA' : 'KICKTERINO_DATA';
+const profile = fs.mkdtempSync(path.join(os.tmpdir(), pkg.name + '-desktop-validation-'));
+fs.mkdirSync(output, { recursive: true });
+const defaults = require('./validation-config.cjs')(root, pkg.version, { watchAll: false });
+const channels = defaults.channels;
+fs.writeFileSync(path.join(profile, 'config.json'), JSON.stringify(defaults));
+
+const report = {
+  product: pkg.productName, os: process.platform, osRelease: os.release(),
+  sourceSha: process.env.VALIDATION_SOURCE_SHA || 'local-preflight',
+  scope: 'unauthenticated UI and official page navigation only',
+  accountLogin: 'not performed; user authentication required',
+  pointAccrual: 'not performed; authenticated live channel required',
+  checks: [], loginPage: { opened: false }, passed: false,
+};
+const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+let child;
+let main;
+let login;
+let childLog = '';
+const playerConnections = new Map();
+
+async function until(action, description, timeout = 30000) {
+  const end = Date.now() + timeout;
+  let last;
+  while (Date.now() < end) {
+    if (child && child.exitCode !== null) throw new Error('Application exited before ' + description);
+    try { const result = await action(); if (result) return result; } catch (error) { last = error.message; }
+    await pause(250);
+  }
+  throw new Error('Timed out waiting for ' + description + (last ? ': ' + last : ''));
+}
+
+async function connect(url) {
+  const socket = new WebSocket(url);
+  const pending = new Map();
+  let next = 0;
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Debug connection timed out')), 10000);
+    socket.addEventListener('open', () => { clearTimeout(timer); resolve(); }, { once: true });
+    socket.addEventListener('error', () => { clearTimeout(timer); reject(new Error('Debug connection failed')); }, { once: true });
+  });
+  const exceptions = [];
+  socket.addEventListener('message', event => {
+    const message = JSON.parse(String(event.data));
+    if (message.id && pending.has(message.id)) {
+      const callback = pending.get(message.id); pending.delete(message.id);
+      clearTimeout(callback.timer);
+      if (message.error) callback.reject(new Error(message.error.message));
+      else callback.resolve(message.result);
+    } else if (message.method === 'Runtime.exceptionThrown') {
+      exceptions.push(String(message.params.exceptionDetails.exception?.description || message.params.exceptionDetails.text).slice(0, 800));
+    }
+  });
+  socket.addEventListener('close', () => {
+    for (const callback of pending.values()) { clearTimeout(callback.timer); callback.reject(new Error('Debug connection closed')); }
+    pending.clear();
+  });
+  return {
+    exceptions,
+    call(method, params = {}) {
+      return new Promise((resolve, reject) => {
+        const id = ++next;
+        const timer = setTimeout(() => { pending.delete(id); reject(new Error('Debug command timed out: ' + method)); }, 15000);
+        pending.set(id, { resolve, reject, timer });
+        socket.send(JSON.stringify({ id, method, params }));
+      });
+    },
+    close() { socket.close(); },
+  };
+}
+
+async function evaluate(connection, expression) {
+  const result = await connection.call('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+  if (result.exceptionDetails) throw new Error(String(result.exceptionDetails.exception?.description || result.exceptionDetails.text).slice(0, 800));
+  return result.result.value;
+}
+async function screenshot(connection, filename) {
+  const result = await connection.call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
+  fs.writeFileSync(path.join(output, filename), Buffer.from(result.data, 'base64'));
+}
+async function playerHealth(listTargets) {
+  const samples = [];
+  for (const target of await listTargets()) {
+    let slug;
+    try {
+      const url = new URL(target.url);
+      slug = url.pathname.slice(1);
+      if (target.type !== 'page' || !channels.includes(slug) || !url.hostname.endsWith(platformHost)) continue;
+      let connection = playerConnections.get(target.id);
+      if (!connection) { connection = await connect(target.webSocketDebuggerUrl); playerConnections.set(target.id, connection); }
+      const sample = await evaluate(connection, `(() => {
+        const video = document.querySelector('video');
+        const rect = video?.getBoundingClientRect();
+        return { visibility: document.visibilityState,
+          gate: Boolean(document.querySelector('[data-a-target="content-classification-gate-overlay-start-watching-button"], [data-a-target="player-overlay-mature-accept"]')),
+          video: video ? { paused: video.paused, time: video.currentTime, ready: video.readyState, errorCode: video.error?.code || null,
+            width: Math.round(rect.width), height: Math.round(rect.height) } : null };
+      })()`);
+      samples.push({ slug, ...sample });
+    } catch { if (slug) samples.push({ slug, pageChanging: true }); }
+  }
+  return samples;
+}
+
+async function freePort() {
+  const server = net.createServer();
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  await new Promise(resolve => server.close(resolve));
+  return port;
+}
+
+(async () => {
+  try {
+    assert(fs.existsSync(executable), 'Packaged executable does not exist');
+    const port = await freePort();
+    const args = ['--remote-debugging-address=127.0.0.1', '--remote-debugging-port=' + port];
+    if (!windows) args.push('--no-sandbox', '--ozone-platform=headless', '--disable-gpu');
+    child = spawn(executable, args, {
+      // Only this empty CI profile enables the existing anonymous playback test mode.
+      env: { ...process.env, [variable]: profile, ...(namespace === 'tt' ? { TWITCHTERINO_ALLOW_ANON: '1' } : {}) }, windowsHide: false,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    child.stdout.on('data', chunk => { childLog = (childLog + String(chunk)).slice(-30000); });
+    child.stderr.on('data', chunk => { childLog = (childLog + String(chunk)).slice(-30000); });
+    child.on('error', error => { childLog += error.message; });
+    const targets = async () => {
+      const response = await fetch('http://127.0.0.1:' + port + '/json/list');
+      return response.json();
+    };
+    const target = await until(async () => (await targets()).find(item => item.type === 'page' && /\/renderer\/index\.html$/.test(item.url)), 'main UI');
+    main = await connect(target.webSocketDebuggerUrl);
+    await main.call('Runtime.enable');
+    await main.call('Page.enable');
+    await until(() => evaluate(main, 'Boolean(window.' + namespace + ' && document.querySelector("#btn-login") && document.querySelector("#composer"))'), 'preload and UI controls');
+    const state = await evaluate(main, 'window.' + namespace + '.getState()');
+    assert.equal(state.loggedIn, false, 'CI profile must remain unauthenticated');
+    assert.equal(state.farming, false);
+    assert.equal(state.maxWatchers, 1);
+    assert.equal(state.rotation, false);
+    assert.equal(state.watchAll, false);
+    assert.equal(state.channels.length, channels.length);
+    assert.equal(await evaluate(main, 'document.title'), pkg.productName);
+    report.checks.push('packaged application opened', 'expected UI and guarded preload loaded', 'IPC getState passed on the actual platform');
+    report.layout = await evaluate(main, '({width:innerWidth,height:innerHeight,scrollWidth:document.documentElement.scrollWidth,screenWidth:screen.availWidth,screenHeight:screen.availHeight})');
+    await screenshot(main, 'main.png');
+
+    // Diagnose the real unauthenticated channel-query path, not only renderer IPC.
+    if (namespace === 'tt') {
+      let observation;
+      try {
+        observation = await until(async () => {
+          const current = await evaluate(main, 'window.tt.getState()');
+          return current.channels.every(channel => channel.rewardsLoaded || channel.error) ? current : null;
+        }, 'public channel query results', 65000);
+      } catch (error) {
+        report.publicChannelQueryError = error.message;
+        observation = await evaluate(main, 'window.tt.getState()');
+      }
+      report.publicChannels = observation.channels.map(channel => ({
+        slug: channel.slug, live: channel.live, rewardsLoaded: channel.rewardsLoaded, error: channel.error,
+      }));
+      await screenshot(main, 'public-channels.png');
+      assert(report.publicChannels.some(channel => channel.rewardsLoaded && !channel.error), 'No public channel query succeeded');
+      report.farmingToggle = { tested: false, scope: 'anonymous test playback only; no account or point accrual' };
+      if (observation.channels.some(channel => channel.live && channel.pointsEnabled)) {
+        await evaluate(main, 'document.querySelector("#farming").click()');
+        await until(async () => (await evaluate(main, 'window.tt.getState()')).channels.some(channel => channel.watching), 'player started through the farming toggle');
+        await pause(5000);
+        const playing = await evaluate(main, 'window.tt.getState()');
+        assert.equal(playing.farming, true);
+        assert(playing.channels.some(channel => channel.watching), 'Player disappeared after enabling farming');
+        assert(playing.channels.some(channel => channel.live && channel.rewardsLoaded), 'Enabling farming cleared live metadata');
+        report.farmingToggle = { ...report.farmingToggle, tested: true, liveChannels: playing.channels.filter(channel => channel.live).length, watching: playing.channels.filter(channel => channel.watching).length };
+        await screenshot(main, 'farming-enabled.png');
+        await evaluate(main, 'document.querySelector("#farming").click()');
+        await until(async () => { const current = await evaluate(main, 'window.tt.getState()'); return !current.farming && !current.channels.some(channel => channel.watching); }, 'player stopped through the farming toggle');
+        report.checks.push('farming toggle started and stopped a real player with public live metadata retained');
+      }
+    }
+
+    await evaluate(main, 'document.querySelector("#btn-settings")?.click()');
+    await evaluate(main, 'document.querySelector("#notify-bonus").click()');
+    await until(async () => (await evaluate(main, 'window.' + namespace + '.getState()')).notifyBonus === true, 'UI checkbox IPC');
+    await evaluate(main, 'document.querySelector("#notify-bonus").click()');
+    await evaluate(main, '(() => {const input=document.querySelector("#max-watchers");input.value="2";input.dispatchEvent(new Event("change",{bubbles:true}));})()');
+    await until(async () => (await evaluate(main, 'window.' + namespace + '.getState()')).maxWatchers === 2, 'numeric UI IPC');
+    await evaluate(main, '(() => {const input=document.querySelector("#max-watchers");input.value="1";input.dispatchEvent(new Event("change",{bubbles:true}));})()');
+    report.checks.push('checkbox changed through the real UI', 'numeric input string accepted through the real UI');
+    await screenshot(main, 'settings.png');
+    if (namespace === 'tt') {
+      await evaluate(main, 'document.querySelector("#watch-all").click()');
+      await until(async () => (await evaluate(main, 'window.tt.getState()')).watchAll === true, 'all-live mode through its UI');
+      assert.equal(await evaluate(main, 'document.querySelector("#max-watchers").disabled'), true);
+      const beforeAll = await evaluate(main, 'window.tt.getState()');
+      const expected = beforeAll.channels.filter(channel => channel.live).length;
+      report.allLivePlayback = { expected, tested: false, scope: 'anonymous playback; no authenticated account or points' };
+      if (expected > 0) {
+        await evaluate(main, 'document.querySelector("#farming").click()');
+        const allPlaying = await until(async () => {
+          const current = await evaluate(main, 'window.tt.getState()');
+          return current.channels.filter(channel => channel.watching).length === expected ? current : null;
+        }, 'all online players start without individual opening');
+        report.allLivePlayback = { ...report.allLivePlayback, tested: true, watching: allPlaying.channels.filter(channel => channel.watching).length };
+        await pause(12000);
+        report.hiddenPlayersBefore = await playerHealth(targets);
+        await pause(4000);
+        report.hiddenPlayersAfter = await playerHealth(targets);
+        report.hiddenPlayerProgress = report.hiddenPlayersAfter.map(after => {
+          const before = report.hiddenPlayersBefore.find(sample => sample.slug === after.slug);
+          return { slug: after.slug, advancing: Boolean(before?.video && after.video && after.video.time > before.video.time + 0.5), gate: after.gate || false, errorCode: after.video?.errorCode || null };
+        });
+        const revealSlug = allPlaying.channels.find(channel => channel.watching).slug;
+        const target = (await targets()).find(item => { try { return new URL(item.url).pathname === '/' + revealSlug; } catch { return false; } });
+        assert(target, 'No live player target available to verify reveal without reload');
+        if (target) {
+          const connection = playerConnections.get(target.id) || await connect(target.webSocketDebuggerUrl);
+          playerConnections.set(target.id, connection);
+          await evaluate(connection, 'window.__desktopValidationMarker="same-document"');
+          await evaluate(main, 'window.tt.showChannel(' + JSON.stringify(revealSlug) + ')');
+          assert.equal(await evaluate(connection, 'window.__desktopValidationMarker'), 'same-document', 'Showing a player reloaded its document');
+          report.allLivePlayback.revealWithoutReload = true;
+          await connection.call('Page.close');
+          await pause(1000);
+        }
+        await screenshot(main, 'all-live-players.png');
+        await evaluate(main, 'document.querySelector("#farming").click()');
+        await until(async () => { const current = await evaluate(main, 'window.tt.getState()'); return !current.farming && !current.channels.some(channel => channel.watching); }, 'all automatic players stop');
+        report.checks.push('all online players started automatically and a player was revealed without reload');
+      }
+    }
+    assert.deepEqual(main.exceptions, [], 'Unexpected main UI JavaScript exception');
+
+    await evaluate(main, 'document.querySelector("#btn-login").click()');
+    const loginTarget = await until(async () => (await targets()).find(item => {
+        try { const url = new URL(item.url); return item.type === 'page' && url.protocol === 'https:' && (url.hostname === platformHost || url.hostname.endsWith('.' + platformHost)) && url.pathname !== '/robots.txt'; }
+        catch { return false; }
+      }), 'official login navigation', 20000);
+    if (loginTarget) {
+      login = await connect(loginTarget.webSocketDebuggerUrl);
+      await login.call('Page.enable');
+      let formReady = false;
+      try {
+        await until(() => evaluate(login, 'Array.from(document.querySelectorAll("input")).some(input => ["email", "password", "text"].includes(input.type) && input.getBoundingClientRect().width > 0 && input.getBoundingClientRect().height > 0 && input.type !== "search")'), 'login form controls', 30000);
+        formReady = true;
+      } catch { /* Page navigation can be verified without authenticating or claiming form readiness. */ }
+      const loginState = await evaluate(login, '({url:location.origin+location.pathname,title:document.title,passwordInput:Boolean(document.querySelector("input[type=password]")),appBridge:Boolean(window.' + namespace + ' && typeof window.' + namespace + '.getState==="function" && typeof window.' + namespace + '.showLogin==="function")})');
+      assert.equal(loginState.appBridge, false, 'Remote login page received the application bridge');
+      report.loginPage = { opened: true, ...loginState, formReady, authenticated: false };
+      report.checks.push('official login window has no application IPC bridge');
+      await screenshot(login, 'login.png');
+    }
+    report.passed = true;
+  } catch (error) {
+    report.error = error.message;
+    if (main) { try { await screenshot(main, 'failure.png'); } catch {} }
+    process.exitCode = 1;
+  } finally {
+    fs.writeFileSync(path.join(output, 'desktop-result.json'), JSON.stringify(report, null, 2) + '\n');
+    fs.writeFileSync(path.join(output, 'application-startup.log'), childLog);
+    if (main) { try { await evaluate(main, 'window.' + namespace + '.quit()'); } catch {} }
+    for (const connection of playerConnections.values()) connection.close();
+    if (login) login.close();
+    if (main) main.close();
+    if (child && child.exitCode === null) {
+      await pause(1000);
+      if (child.exitCode === null) {
+        if (windows) spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+        else child.kill('SIGTERM');
+      }
+    }
+    await pause(500);
+    try { fs.rmSync(profile, { recursive: true, force: true, maxRetries: 4, retryDelay: 500 }); } catch {}
+    console.log(JSON.stringify(report, null, 2));
+  }
+})().catch(error => { console.error(error.message); process.exitCode = 1; });
+
