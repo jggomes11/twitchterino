@@ -14,11 +14,11 @@ const executable = path.resolve(process.argv[2] || path.join(root, 'release-outp
 const reportPath = path.resolve(process.argv[3] || path.join(root, 'release-output', 'profile-validation.json'));
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'twitchterino-profile-validation-'));
 const children = [];
-const report = { version: pkg.version, scope: 'four empty portable profiles; no account or point awards', passed: false };
+const report = { version: pkg.version, scope: 'four empty portable profiles; no account or point awards', graphics: 'software rendering in the multi-process CI fixture', passed: false };
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 function launch(profile) {
   console.log('Profile fixture: launch requested at ' + new Date().toISOString() + ', free MiB ' + Math.round(os.freemem() / 1048576));
-  const child = spawn(executable, [], { env: { ...process.env, TWITCHTERINO_DATA: profile, TWITCHTERINO_DEBUG: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(executable, ['--disable-gpu'], { env: { ...process.env, TWITCHTERINO_DATA: profile, TWITCHTERINO_DEBUG: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
   child.output = '';
   for (const stream of [child.stdout, child.stderr]) stream.on('data', data => { child.output = (child.output + data).slice(0, 6000); });
   child.on('error', error => { child.launchError = error.message; });
