@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const { spawn, spawnSync } = require('node:child_process');
+const { spawn } = require('node:child_process');
 const pkg = require('../package.json');
 
 assert.equal(process.platform, 'win32', 'Validate portable profile processes on native Windows');
@@ -15,10 +15,22 @@ const children = [];
 const report = { version: pkg.version, scope: 'four empty portable profiles; no account or point awards', passed: false };
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 function launch(profile) {
-  const child = spawn(executable, [], { env: { ...process.env, TWITCHTERINO_DATA: profile }, stdio: 'ignore' });
+  const child = spawn(executable, [], { env: { ...process.env, TWITCHTERINO_DATA: profile, TWITCHTERINO_DEBUG: '' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  child.output = '';
+  for (const stream of [child.stdout, child.stderr]) stream.on('data', data => { child.output = (child.output + data).slice(-4000); });
   child.on('error', error => { child.launchError = error.message; });
   children.push(child);
+  console.log('Profile fixture: launched process ' + child.pid);
   return child;
+}
+
+async function stop(child) {
+  if (child.exitCode !== null) return;
+  console.log('Profile fixture: stopping process ' + child.pid);
+  child.kill();
+  const deadline = Date.now() + 5000;
+  while (child.exitCode === null && Date.now() < deadline) await pause(100);
+  assert.notEqual(child.exitCode, null, 'Test process did not stop within five seconds');
 }
 
 (async () => {
@@ -46,14 +58,15 @@ function launch(profile) {
     }
     await pause(3000);
     assert(profiles.every(profile => profile.child.exitCode === null), 'Four profiles did not stay open concurrently');
+    console.log('Profile fixture: four first-use profiles loaded and remain open');
     const duplicate = launch(profiles[0].path);
     const duplicateDeadline = Date.now() + 30000;
     while (duplicate.exitCode === null && !duplicate.launchError && Date.now() < duplicateDeadline) await pause(250);
     assert(!duplicate.launchError, 'Duplicate launch failed before testing the lock');
     assert.equal(duplicate.exitCode, 0, 'Opening an existing profile did not exit cleanly');
+    console.log('Profile fixture: duplicate profile exited cleanly');
     assert(profiles.every(profile => profile.child.exitCode === null), 'Duplicate launch stopped an existing profile');
-    const stopped = spawnSync('taskkill', ['/PID', String(profiles[0].child.pid), '/T', '/F'], { stdio: 'ignore' });
-    assert.equal(stopped.status, 0, 'Could not close the first test profile');
+    await stop(profiles[0].child);
     await pause(1000);
     assert(profiles.slice(1).every(profile => profile.child.exitCode === null), 'Closing one profile stopped another');
     report.simultaneousProfiles = profiles.length;
@@ -65,13 +78,19 @@ function launch(profile) {
     console.log(JSON.stringify(report, null, 2));
   } catch (error) {
     report.error = error.message;
+    report.diagnostics = children.map(child => ({ pid: child.pid, exitCode: child.exitCode, launchError: child.launchError, output: child.output }));
+    console.error(JSON.stringify(report.diagnostics));
     console.error(error.message);
     process.exitCode = 1;
   } finally {
     for (const child of children) {
-      if (child.pid && child.exitCode === null) spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+      try { await stop(child); }
+      catch (error) { console.error(error.message); process.exitCode = 1; }
+      child.stdout.destroy(); child.stderr.destroy(); child.unref();
     }
     fs.writeFileSync(path.join(root, 'release-output', 'profile-validation.json'), JSON.stringify(report, null, 2) + '\n');
-    fs.rmSync(temporary, { recursive: true, force: true, maxRetries: 4, retryDelay: 250 });
+    try { fs.rmSync(temporary, { recursive: true, force: true }); }
+    catch { console.log('Empty temporary profiles remain in the disposable runner.'); }
+    console.log('Profile fixture: cleanup complete');
   }
 })();

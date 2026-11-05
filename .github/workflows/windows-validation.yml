@@ -74,6 +74,7 @@ jobs:
         run: node scripts/package-windows-release.cjs
       - name: Validate four simultaneous isolated portable profiles
         if: success() && env.BUILD_RELEASE == 'true'
+        timeout-minutes: 3
         run: node scripts/validate-profiles.cjs
       - name: Archive portable profiles and calculate release checksums
         if: success() && env.BUILD_RELEASE == 'true'
