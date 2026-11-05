@@ -36,6 +36,9 @@ jobs:
         run: npm test
       - name: Validate native Electron session transport
         run: npm run test:electron
+      - name: Diagnose public Twitch transport without an account
+        continue-on-error: true
+        run: node scripts/diagnose-twitch-public.cjs
       - name: Audit dependencies
         run: |
           npm audit
