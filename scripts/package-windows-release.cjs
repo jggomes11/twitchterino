@@ -21,6 +21,7 @@ fs.copyFileSync(path.join(root, 'LICENSE'), path.join(output, 'portable', 'LICEN
 for (let profile = 1; profile <= 4; profile++) {
   const launcher = [
     '@echo off', 'setlocal',
+    'set "ELECTRON_NO_ATTACH_CONSOLE=1"',
     `set "TWITCHTERINO_DATA=%LOCALAPPDATA%\\Twitchterino-Profiles\\Conta-${profile}"`,
     'start "" "%~dp0app\\Twitchterino.exe"', 'endlocal', '',
   ].join('\r\n');
