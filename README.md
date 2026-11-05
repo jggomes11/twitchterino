@@ -8,6 +8,7 @@ Twitchterino is an Electron client for Twitch chat and PokeIdle channel-point tr
 
 - Application API queries use the platform session from Electron's main process. They no longer inject query tokens into a navigable page.
 - Credential-bearing requests have fixed destinations, reject redirects, abort on timeout/session replacement and limit response size.
+- Logout cancels queued stores and pending account work. Verified account changes reset balance baselines and archive/restore each account's reports; ordinary token rotation retains its baseline. Legacy unlabelled reports are adopted by the first verified account.
 - Every application IPC command authenticates the exact local UI main frame and validates its arguments before side effects.
 - The preload bridge is unavailable to remote pages and child frames; the privileged UI cannot navigate to remote sites or open remote popups.
 - Automatic update checking, downloading and installation are disabled. The fork metadata points to this repository; there is no signed automatic-update channel yet.

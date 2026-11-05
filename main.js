@@ -10,6 +10,7 @@ const path = require('path');
 const fs = require('fs');
 const { createPlatformClient } = require('./security/platform');
 const { readCookie } = require('./security/requests');
+const { selectReportAccount } = require('./security/accounts');
 const { createIpcRegistrar } = require('./security/ipc');
 const { pathToFileURL } = require('node:url');
 const UI_DOCUMENT = pathToFileURL(path.join(__dirname, 'renderer', 'index.html')).href;
@@ -32,8 +33,27 @@ app.userAgentFallback = app.userAgentFallback.replace(/ (Electron|twitchterino|T
 const PARTITION = 'persist:twitch';
 const apiClient = createPlatformClient('twitch', () => session.fromPartition(PARTITION));
 let sessionTransition = false;
+let verifiedAccountGeneration = -1;
 function assertSession(generation) {
   if (sessionTransition || apiClient.generation !== generation) throw new Error('Session changed');
+}
+
+function resetAccountRuntime() {
+  storeSequence = null;
+  const windows = [...storeWindows.values()];
+  storeWindows.clear();
+  for (const win of windows) if (!win.isDestroyed()) win.destroy();
+  for (const slug of [...watchers.keys()]) stopWatcher(slug);
+  chestQueue.length = 0;
+  lastClaimTry.clear();
+  for (const win of chestWindows) if (!win.isDestroyed()) win.destroy();
+  status.clear();
+}
+
+function adoptVerifiedAccount(account) {
+  if (selectReportAccount(config, account)) resetAccountRuntime();
+  verifiedAccountGeneration = apiClient.generation;
+  configDirty = true;
 }
 const TWITCH = 'https://www.twitch.tv';
 const GQL = 'https://gql.twitch.tv/gql';
@@ -120,9 +140,11 @@ function setupSession() {
   ses.cookies.on('changed', (_e, cookie, _cause, removed) => {
     if (cookie.name !== 'auth-token' || !['twitch.tv', 'www.twitch.tv'].includes(cookie.domain.replace(/^\./, ''))) return;
     apiClient.invalidate();
+    verifiedAccountGeneration = -1;
     username = null;
     loggedIn = false;
-    if (removed) return;
+    if (ircSend) { const socket = ircSend; ircSend = null; try { socket.close(); } catch {} }
+    if (removed) { resetAccountRuntime(); return; }
     setTimeout(() => {
       if (apiWin && !apiWin.isDestroyed() && apiWin.isVisible()) { apiWin.hide(); loadApi(LIGHT_URL).then(poll); }
     }, 2500);
@@ -359,21 +381,24 @@ function watchRedemptions(slug, wc) {
   if (!dbg.isAttached()) { try { dbg.attach('1.3'); } catch { return; } }
   const pending = new Map();
   dbg.on('message', async (_e, method, p) => {
+    if (sessionTransition || wc.isDestroyed()) return;
+    const generation = apiClient.generation;
     if (method === 'Network.requestWillBeSent' && p.request.url.startsWith(GQL)) {
       let body = p.request.postData;
       if (!body && p.request.hasPostData) body = (await dbg.sendCommand('Network.getRequestPostData', { requestId: p.requestId }).catch(() => ({}))).postData;
-      if (!body || !body.includes('RedeemCustomReward')) return;
+      if (generation !== apiClient.generation || sessionTransition || wc.isDestroyed() || !body || !body.includes('RedeemCustomReward')) return;
       try {
         const ops = [].concat(JSON.parse(body));
         const op = ops.find((o) => o.operationName === 'RedeemCustomReward');
         const input = op && op.variables && op.variables.input;
-        if (input) pending.set(p.requestId, input);
+        if (input) pending.set(p.requestId, { input, generation });
       } catch {}
     } else if (method === 'Network.loadingFinished' && pending.has(p.requestId)) {
-      const input = pending.get(p.requestId);
+      const operation = pending.get(p.requestId);
+      const input = operation.input;
       pending.delete(p.requestId);
       const res = await dbg.sendCommand('Network.getResponseBody', { requestId: p.requestId }).catch(() => null);
-      if (!res) return;
+      if (!res || operation.generation !== apiClient.generation || sessionTransition || wc.isDestroyed()) return;
       let ok = false;
       try {
         const r = [].concat(JSON.parse(res.base64Encoded ? Buffer.from(res.body, 'base64').toString() : res.body))
@@ -498,7 +523,7 @@ async function refreshAll() {
   // A Twitch aceita no máximo 15 consultas por chamada: vai de 10 em 10.
   for (let i = 0; i < slugs.length; i += 10) {
     const part = slugs.slice(i, i + 10);
-    const query = `query{ ${i === 0 ? 'currentUser{ login displayName }' : ''} ${part.map((slug, j) => `c${j}: user(login: ${JSON.stringify(slug)}){ ${CHANNEL_FIELDS} }`).join(' ')} }`;
+    const query = `query{ ${i === 0 ? 'currentUser{ id login displayName }' : ''} ${part.map((slug, j) => `c${j}: user(login: ${JSON.stringify(slug)}){ ${CHANNEL_FIELDS} }`).join(' ')} }`;
     let data = null, err = null;
     try {
       const { status: code, json } = await gql(query);
@@ -506,7 +531,17 @@ async function refreshAll() {
       data = json.data;
     } catch (e) { err = String(e.message || e); }
     assertSession(generation);
-    if (data && i === 0) username = data.currentUser ? data.currentUser.displayName || data.currentUser.login : null;
+    if (data && i === 0) {
+      const user = data.currentUser;
+      if (user && user.login) {
+        const id = String(user.id || '');
+        adoptVerifiedAccount(/^[1-9][0-9]*$/.test(id) ? 'id:' + id : 'login:' + user.login.toLowerCase());
+        username = user.displayName || user.login;
+      } else {
+        username = null;
+        verifiedAccountGeneration = -1;
+      }
+    }
     part.forEach((slug, j) => {
       const s = status.get(slug) || { watchedMs: 0 };
       const u = data && data[`c${j}`];
@@ -541,6 +576,7 @@ async function refreshAll() {
       if (claim && claim !== s.claim) fresh.push(slug);
       s.claim = claim || null;
       const p = cp ? cp.balance : null;
+      if (verifiedAccountGeneration !== generation) { s.points = null; s.bonusTier = null; s.targetTier = null; }
       if (typeof p === 'number') {
         if (s.points != null && p > s.points) {
           s.gainedTotal = (s.gainedTotal || 0) + (p - s.points);
@@ -747,15 +783,23 @@ function syncChat() {
 
 // Envio: uma conexão com a sua conta, aberta na primeira mensagem que você manda.
 async function sendChat(slug, content) {
+  const generation = apiClient.generation;
+  if (sessionTransition) return { ok: false, message: 'Session changed' };
   const token = await authToken();
+  if (sessionTransition || generation !== apiClient.generation) return { ok: false, message: 'Session changed' };
   if (!token || !username) return { ok: false, message: 'faça login na Twitch' };
   const login = String(username).toLowerCase();
-  if (!ircSend || ircSend.readyState > 1 || ircSend.login !== login) {
+  if (!ircSend || ircSend.readyState > 1 || ircSend.login !== login || ircSend.generation !== generation) {
+    if (ircSend) { try { ircSend.close(); } catch {} }
     const ws = new WebSocket('wss://irc-ws.chat.twitch.tv:443');
     ws.login = login;
+    ws.generation = generation;
     ircSend = ws;
     ws.ready = new Promise((resolve, reject) => {
-      ws.onopen = () => { ws.send(`PASS oauth:${token}`); ws.send(`NICK ${login}`); };
+      ws.onopen = () => {
+        if (generation !== apiClient.generation || sessionTransition || ircSend !== ws) { try { ws.close(); } catch {} reject(new Error('Session changed')); return; }
+        ws.send(`PASS oauth:${token}`); ws.send(`NICK ${login}`);
+      };
       ws.onmessage = (e) => {
         for (const line of String(e.data).split('\r\n')) {
           if (line.startsWith('PING')) ws.send(line.replace('PING', 'PONG'));
@@ -767,12 +811,16 @@ async function sendChat(slug, content) {
       setTimeout(() => reject(new Error('timeout')), 10 * 1000);
     });
   }
+  const socket = ircSend;
   try {
-    await ircSend.ready;
-    ircSend.send(`PRIVMSG #${slug} :${String(content).replace(/[\r\n]+/g, ' ').slice(0, 500)}`);
+    await socket.ready;
+    assertSession(generation);
+    if (ircSend !== socket) throw new Error('Session changed');
+    socket.send(`PRIVMSG #${slug} :${String(content).replace(/[\r\n]+/g, ' ').slice(0, 500)}`);
     return { ok: true };
   } catch (e) {
-    ircSend = null;
+    if (ircSend === socket) ircSend = null;
+    try { socket.close(); } catch {}
     return { ok: false, message: e.message };
   }
 }
@@ -871,6 +919,7 @@ function openStore(slug, title = `Pontos — ${slug}`) {
   win.loadURL(`${TWITCH}/popout/${slug}/chat?popout=`);
   win.on('page-title-updated', (e) => e.preventDefault());
   win.on('closed', () => {
+    if (storeWindows.get(slug) !== win) return;
     storeWindows.delete(slug);
     poll();
     if (storeSequence && storeSequence.current === slug) openNextStore();
@@ -1344,10 +1393,8 @@ handleIpc('logout', async () => {
   apiClient.suspend();
   try {
     apiWin.webContents.stop();
-    chestQueue.length = 0;
-    for (const win of chestWindows) if (!win.isDestroyed()) win.destroy();
-    for (const slug of [...watchers.keys()]) stopWatcher(slug);
-    for (const win of storeWindows.values()) if (!win.isDestroyed()) win.close();
+    resetAccountRuntime();
+    verifiedAccountGeneration = -1;
     if (ircSend) { try { ircSend.close(); } catch {} ircSend = null; }
     const ses = session.fromPartition(PARTITION);
     await ses.clearStorageData();

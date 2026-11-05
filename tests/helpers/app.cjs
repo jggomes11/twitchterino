@@ -8,7 +8,7 @@ const { createRequire } = require('node:module');
 
 function loadApp({ packaged = false, platform = 'win32' } = {}) {
   const root = path.resolve(__dirname, '../..');
-  const state = { scripts: [], requests: [], writes: [], quit: 0, updates: 0, windows: [], ready: [], dialogResponse: 0 };
+  const state = { scripts: [], requests: [], writes: [], quit: 0, updates: 0, windows: [], ready: [], dialogResponse: 0, sockets: [] };
   const cookies = new EventEmitter();
   cookies.get = async ({ name }) => [{ value: name === 'auth-token' || name === 'session_token' ? 'FAKE_ACCOUNT_TOKEN' : 'FAKE_OTHER_COOKIE' }];
   const session = {
@@ -74,12 +74,17 @@ function loadApp({ packaged = false, platform = 'win32' } = {}) {
     require: name => name === 'electron' ? electron : name === 'electron-updater' ? { autoUpdater: { on() {}, checkForUpdatesAndNotify: async () => { state.updates++; } } }
       : name === 'fs' ? { existsSync: () => false, readFileSync: () => '{}', writeFileSync: (...args) => state.writes.push(args), mkdirSync() {}, appendFileSync() {} }
       : ownRequire(name),
+    WebSocket: class {
+      constructor() { this.readyState = 0; this.messages = []; state.sockets.push(this); }
+      send(message) { this.messages.push(message); }
+      close() { this.readyState = 3; if (this.onclose) this.onclose(); }
+    },
     __dirname: root, module: { exports: {} }, Buffer, URL, console, AbortController, TextDecoder,
     process: { platform, env: {}, argv: [] },
     setTimeout: () => 1, clearTimeout() {}, setInterval: () => 1, clearInterval() {}, setImmediate, queueMicrotask,
   };
   vm.createContext(context);
-  const exported = 'module.exports = { query: typeof gql === "function" ? gql : kickFetch, poll, snapshot, setupSession, setup(main, api) { mainWin = main; apiWin = api; apiReady = Promise.resolve(); }, status, config, get client() { return typeof apiClient === "undefined" ? null : apiClient; } };';
+  const exported = 'module.exports = { query: typeof gql === "function" ? gql : kickFetch, poll, snapshot, setupSession, sendChat: typeof sendChat === "function" ? sendChat : null, watchRedemptions: typeof watchRedemptions === "function" ? watchRedemptions : null, setUsername(value) { username = value; }, setup(main, api) { mainWin = main; apiWin = api; apiReady = Promise.resolve(); }, status, config, get client() { return typeof apiClient === "undefined" ? null : apiClient; } };';
   vm.runInContext(fs.readFileSync(path.join(root, 'main.js'), 'utf8') + exported, context, { filename: path.join(root, 'main.js') });
   const main = new Window();
   main.loadFile(path.join(root, 'renderer/index.html'));

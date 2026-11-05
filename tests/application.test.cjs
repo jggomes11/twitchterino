@@ -68,3 +68,94 @@ test('packaged startup never contacts an automatic update service', async () => 
   assert.equal(app.state.updates, 0);
 });
 
+
+test('logout cancels a store queue before asynchronous window close events', async () => {
+  const app = loadApp();
+  const channels = app.apiExports.config.channels.slice(0, 2);
+  await app.handlers.get('stores:sequence')(app.event(), channels);
+  const firstStore = app.state.windows[2];
+  firstStore.close = () => setImmediate(() => firstStore.destroy());
+  await app.handlers.get('logout')(app.event());
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(app.state.windows.length, 3, 'a second queued store must not open after logout');
+  assert.equal(app.apiExports.snapshot().storeSequence, null);
+});
+
+function setAccountResponses(app, account) {
+  app.session.fetch = async (url) => {
+    if (platform === 'twitch') {
+      const user = { id: 'channel-id', displayName: 'Channel', stream: null,
+        channel: { self: { communityPoints: { balance: account.points } }, communityPointsSettings: { isEnabled: true, customRewards: [] } } };
+      const data = { currentUser: { id: account.id, login: account.name, displayName: account.name } };
+      for (let i = 0; i < 10; i++) data['c' + i] = user;
+      return new Response(JSON.stringify({ data }));
+    }
+    if (/\/api\/v[12]\/user$/.test(url)) return new Response(JSON.stringify({ id: account.id, username: account.name }));
+    if (url.endsWith('/points')) return new Response(JSON.stringify({ points: account.points }));
+    if (url.endsWith('/me')) return new Response('{"is_following":false,"subscription":null}');
+    return new Response('{"chatroom":{"id":123},"livestream":null,"user":{"username":"Channel"}}');
+  };
+}
+
+test('a replacement account starts with its own balance baseline', async () => {
+  const app = loadApp();
+  app.apiExports.setupSession();
+  const account = { id: '1', name: 'account_a', points: 100 };
+  setAccountResponses(app, account);
+  await app.apiExports.poll();
+  account.id = '2'; account.name = 'account_b'; account.points = 200;
+  app.session.cookies.emit('changed', {}, { name: platform === 'twitch' ? 'auth-token' : 'session_token', domain: platform === 'twitch' ? '.twitch.tv' : '.kick.com' }, 'explicit', false);
+  await app.apiExports.poll();
+  assert.equal(Object.values(app.apiExports.config.daily).reduce((sum, value) => sum + value, 0), 0);
+  assert.equal(app.apiExports.snapshot().channels.reduce((sum, channel) => sum + channel.gained, 0), 0);
+});
+
+test('ordinary token rotation for the same account keeps its earnings baseline', async () => {
+  const app = loadApp();
+  app.apiExports.setupSession();
+  const account = { id: '1', name: 'account_a', points: 100 };
+  setAccountResponses(app, account);
+  await app.apiExports.poll();
+  account.points = 110;
+  app.session.cookies.emit('changed', {}, { name: platform === 'twitch' ? 'auth-token' : 'session_token', domain: platform === 'twitch' ? '.twitch.tv' : '.kick.com' }, 'explicit', false);
+  await app.apiExports.poll();
+  assert.equal(Object.values(app.apiExports.config.daily).reduce((sum, value) => sum + value, 0), 170);
+});
+
+if (platform === 'twitch') {
+  test('a redemption response completing after logout cannot restore old account state', async () => {
+    const app = loadApp();
+    const { EventEmitter } = require('node:events');
+    const debuggerApi = new EventEmitter();
+    let release;
+    debuggerApi.isAttached = () => true;
+    debuggerApi.sendCommand = async method => method === 'Network.getResponseBody' ? new Promise(resolve => { release = resolve; }) : {};
+    app.apiExports.watchRedemptions('clovaobengala', { debugger: debuggerApi, isDestroyed: () => false });
+    debuggerApi.emit('message', {}, 'Network.requestWillBeSent', { requestId: 'old', request: {
+      url: 'https://gql.twitch.tv/gql', postData: JSON.stringify({ operationName: 'RedeemCustomReward', variables: { input: { cost: 300, title: '+15% XP' } } }),
+    } });
+    debuggerApi.emit('message', {}, 'Network.loadingFinished', { requestId: 'old' });
+    while (!release) await new Promise(resolve => setImmediate(resolve));
+    await app.handlers.get('logout')(app.event());
+    release({ body: '{"data":{"redeemCustomReward":{"redemption":{}}}}' });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(app.apiExports.status.size, 0);
+    assert.equal(app.apiExports.config.purchases.length, 0);
+  });
+
+  test('pending IRC authentication and messages cannot survive cookie invalidation', async () => {
+    const app = loadApp();
+    app.apiExports.setupSession();
+    app.apiExports.setUsername('tester');
+    const pending = app.handlers.get('chat:send')(app.event(), { chatroomId: 'clovaobengala', content: 'hello' });
+    while (!app.state.sockets.length) await new Promise(resolve => setImmediate(resolve));
+    const socket = app.state.sockets[0];
+    app.session.cookies.emit('changed', {}, { name: 'auth-token', domain: '.twitch.tv' }, 'explicit', true);
+    socket.onopen();
+    socket.onmessage({ data: ':tmi.twitch.tv 001 tester :Welcome\r\n' });
+    const result = await pending;
+    assert.equal(result.ok, false);
+    assert.deepEqual(socket.messages, []);
+  });
+}
+
