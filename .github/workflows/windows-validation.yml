@@ -4,6 +4,11 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
+    inputs:
+      release:
+        description: Build Windows installer and portable release candidates
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -19,6 +24,7 @@ jobs:
     timeout-minutes: 25
     env:
       VALIDATION_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      BUILD_RELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.release || false }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -44,7 +50,9 @@ jobs:
           npm audit --omit=dev
       - name: Package Windows without publishing
         id: package
-        run: npm run dist -- --dir --publish never
+        run: |
+          if ($env:BUILD_RELEASE -eq 'true') { npm run dist -- --x64 --publish never }
+          else { npm run dist -- --dir --publish never }
       - name: Validate packaged UI and official login navigation
         run: node scripts/validate-desktop.cjs
       - name: Prepare isolated manual validation bundle
@@ -61,6 +69,33 @@ jobs:
           New-Item -ItemType Directory -Path $ProbeProfile -Force | Out-Null
           try { ./validation-output/Start-WindowsValidation.ps1 -CheckOnly -ProfileCommit '000000000000' }
           finally { Remove-Item -LiteralPath $ProbeProfile -Force }
+      - name: Prepare Windows release candidates
+        if: success() && env.BUILD_RELEASE == 'true'
+        run: node scripts/package-windows-release.cjs
+      - name: Validate four simultaneous isolated portable profiles
+        if: success() && env.BUILD_RELEASE == 'true'
+        run: node scripts/validate-profiles.cjs
+      - name: Archive portable profiles and calculate release checksums
+        if: success() && env.BUILD_RELEASE == 'true'
+        run: |
+          $ReleaseVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          Compress-Archive -Path release-output/portable/* -DestinationPath "release-output/Twitchterino-$ReleaseVersion-Windows-x64-4-contas.zip"
+          Get-ChildItem release-output -File | Where-Object { $_.Extension -in '.exe', '.zip' } | Sort-Object Name | ForEach-Object {
+            $ReleaseHash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$ReleaseHash  $($_.Name)"
+          } | Set-Content -Encoding ascii release-output/SHA256SUMS.txt
+      - name: Preserve verified Windows release candidates
+        if: success() && env.BUILD_RELEASE == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-release-${{ github.sha }}
+          path: |
+            release-output/*.exe
+            release-output/*.zip
+            release-output/*.txt
+            release-output/*.json
+          retention-days: 7
+          if-no-files-found: error
       - name: Preserve Windows evidence and validation build
         # The launcher checks hashes without opening another GUI during CI.
         if: always()

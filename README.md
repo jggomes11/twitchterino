@@ -49,13 +49,13 @@ The packaging configuration includes the main-process security modules. Tests ex
 
 ## Distribution and session compatibility
 
-This maintenance change does not publish reviewed installers or releases. Downloads from the original author's project do not contain the fork's changes. Update maintained builds manually from reviewed source until a separate trusted signing/update policy is established.
+Windows x64 builds are published manually in this fork's [releases](https://github.com/jggomes11/twitchterino/releases). Executables are unsigned, and automatic updates remain disabled. Downloads from the original author's project do not contain the fork's changes.
 
-The existing application ID, profile directories and visible name are retained. Resolve installer coexistence and final distribution identity before installing a fork build alongside the original. Do not commit cookies, tokens, browser profiles or personal session data.
+The installer keeps the existing application ID and replaces an installation with that identity rather than installing alongside it. The visible name and default profile remain compatible. For four separate accounts, extract the entire `4-contas.zip` release asset and use `Abrir-Conta-1.cmd` through `Abrir-Conta-4.cmd`. Each launcher uses its own persistent profile under `%LOCALAPPDATA%\Twitchterino-Profiles\Conta-N`; reopening the same launcher focuses that profile's existing instance. These profiles are separate from the default app and earlier validation profiles; sign in separately in each official Twitch window. Updates keep the four profile paths stable. Do not share profile directories between processes or commit cookies, tokens, browser profiles or personal session data.
 
 The partner list remains public configuration fetched from the original author's GitHub Pages URL with the existing slug validation. It is separate from application updates.
 
-Live Twitch login, live point accrual and Windows UI behavior require manual validation with the maintained build. Controlled tests with fake sessions do not establish those behaviors.
+The user has confirmed real Windows login, point accrual and automatic bonus collection in the maintained build. Automated release validation additionally checks four simultaneous empty portable profiles and the same-profile instance lock; it does not prove point awards for four authenticated accounts.
 
 ## Attribution
 
