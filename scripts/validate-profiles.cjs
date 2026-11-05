@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const { isRunning, stop } = require('./profile-process.cjs');
 const pkg = require('../package.json');
 
@@ -80,6 +80,20 @@ function launch(profile) {
     console.log(JSON.stringify(report, null, 2));
   } catch (error) {
     report.error = error.message;
+    const capture = path.join(path.dirname(reportPath), 'profile-desktop.png');
+    fs.mkdirSync(path.dirname(capture), { recursive: true });
+    const ids = children.map(child => child.pid).filter(Number.isInteger).join(',');
+    const diagnostic = spawnSync('powershell.exe', ['-NoProfile', '-Command',
+      `Get-Process -Id ${ids} -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,Responding,MainWindowTitle,WorkingSet64 | ConvertTo-Json -Compress; ` +
+      `Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; ` +
+      `$CaptureBounds = [System.Windows.Forms.SystemInformation]::VirtualScreen; ` +
+      `$CaptureImage = New-Object System.Drawing.Bitmap($CaptureBounds.Width, $CaptureBounds.Height); ` +
+      `$CaptureGraphics = [System.Drawing.Graphics]::FromImage($CaptureImage); ` +
+      `$CaptureGraphics.CopyFromScreen($CaptureBounds.Location, [System.Drawing.Point]::Empty, $CaptureBounds.Size); ` +
+      `$CaptureImage.Save('${capture.replace(/'/g, "''")}', [System.Drawing.Imaging.ImageFormat]::Png); ` +
+      `$CaptureGraphics.Dispose(); $CaptureImage.Dispose();`,
+    ], { encoding: 'utf8', timeout: 10000 });
+    console.error('Native process inspection: ' + diagnostic.stdout?.slice(0, 4000));
     report.diagnostics = children.map(child => ({ pid: child.pid, exitCode: child.exitCode, signalCode: child.signalCode, launchError: child.launchError, output: child.output }));
     console.error(JSON.stringify(report.diagnostics));
     console.error(error.message);
