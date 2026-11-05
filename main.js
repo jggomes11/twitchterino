@@ -1555,8 +1555,12 @@ handleIpc('channel:show', (_e, slug) => {
 });
 handleIpc('chat:send', (_e, { chatroomId, content }) => sendChat(chatroomId, content));
 
-if (!app.requestSingleInstanceLock()) {
+step('profile lock requested', process.pid);
+const ownsProfile = app.requestSingleInstanceLock();
+step('profile lock result', process.pid, ownsProfile);
+if (!ownsProfile) {
   app.isQuitting = true;
+  step('secondary exit requested', process.pid);
   app.quit();
 } else {
   app.on('second-instance', showMain);
