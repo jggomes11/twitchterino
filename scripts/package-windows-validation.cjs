@@ -28,20 +28,14 @@ function visit(directory) {
 }
 visit(app);
 const sourceSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
-const block = fs.readFileSync(path.join(root, 'main.js'), 'utf8').match(/channels:\s*(\[[\s\S]*?\])/);
-const channels = block ? [...block[1].matchAll(/'([a-z0-9_-]+)'/g)].map(match => match[1]) : [];
-assert(channels.length > 0);
 const variable = pkg.name === 'twitchterino' ? 'TWITCHTERINO_DATA' : 'KICKTERINO_DATA';
 fs.writeFileSync(path.join(stage, 'build-info.json'), JSON.stringify({
   repository: pkg.name, executable: pkg.productName + '.exe', version: pkg.version, sourceSha,
   profileVariable: variable, signed: false, purpose: 'isolated manual validation, not a release',
   files: files.sort((a, b) => a.path.localeCompare(b.path)),
 }, null, 2) + '\n');
-fs.writeFileSync(path.join(stage, 'validation-defaults.json'), JSON.stringify({
-  channels, seenDefaults: channels, farming: false, maxWatchers: 1, rotation: false,
-  autoChest: false, notifyBonus: false, notifyChest: false, notifyChat: false,
-  lastSeenVersion: pkg.version, daily: {}, purchases: [],
-}, null, 2) + '\n');
+fs.writeFileSync(path.join(stage, 'validation-defaults.json'),
+  JSON.stringify(require('./validation-config.cjs')(root, pkg.version), null, 2) + '\n');
 fs.copyFileSync(path.join(root, 'scripts', 'Start-WindowsValidation.ps1'), path.join(stage, 'Start-WindowsValidation.ps1'));
 fs.copyFileSync(path.join(root, 'docs', 'WINDOWS_VALIDATION.md'), path.join(stage, 'WINDOWS_VALIDATION.md'));
 console.log('Prepared isolated Windows validation bundle for ' + pkg.name + ' at ' + sourceSha);

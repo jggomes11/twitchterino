@@ -6,7 +6,7 @@ const { EventEmitter } = require('node:events');
 const { pathToFileURL } = require('node:url');
 const { createRequire } = require('node:module');
 
-function loadApp({ packaged = false, platform = 'win32' } = {}) {
+function loadApp({ packaged = false, platform = 'win32', configSeed = null } = {}) {
   const root = path.resolve(__dirname, '../..');
   const state = { scripts: [], requests: [], writes: [], quit: 0, updates: 0, windows: [], ready: [], dialogResponse: 0, sockets: [] };
   const cookies = new EventEmitter();
@@ -72,7 +72,7 @@ function loadApp({ packaged = false, platform = 'win32' } = {}) {
   const ownRequire = createRequire(path.join(root, 'main.js'));
   const context = {
     require: name => name === 'electron' ? electron : name === 'electron-updater' ? { autoUpdater: { on() {}, checkForUpdatesAndNotify: async () => { state.updates++; } } }
-      : name === 'fs' ? { existsSync: () => false, readFileSync: () => '{}', writeFileSync: (...args) => state.writes.push(args), mkdirSync() {}, appendFileSync() {} }
+      : name === 'fs' ? { existsSync: () => configSeed !== null, readFileSync: () => JSON.stringify(configSeed || {}), writeFileSync: (...args) => state.writes.push(args), mkdirSync() {}, appendFileSync() {} }
       : ownRequire(name),
     WebSocket: class {
       constructor() { this.readyState = 0; this.messages = []; state.sockets.push(this); }

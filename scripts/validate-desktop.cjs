@@ -22,18 +22,14 @@ const platformHost = pkg.name === 'twitchterino' ? 'twitch.tv' : 'kick.com';
 const variable = pkg.name === 'twitchterino' ? 'TWITCHTERINO_DATA' : 'KICKTERINO_DATA';
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), pkg.name + '-desktop-validation-'));
 fs.mkdirSync(output, { recursive: true });
-const channelBlock = fs.readFileSync(path.join(root, 'main.js'), 'utf8').match(/channels:\s*(\[[\s\S]*?\])/);
-const channels = channelBlock ? [...channelBlock[1].matchAll(/'([a-z0-9_-]+)'/g)].map(match => match[1]) : [];
-assert(channels.length > 0, 'No channel fixtures were found');
-fs.writeFileSync(path.join(profile, 'config.json'), JSON.stringify({
-  channels, seenDefaults: channels, farming: false, maxWatchers: 1, rotation: false,
-  autoChest: false, notifyBonus: false, notifyChest: false, notifyChat: false,
-  lastSeenVersion: pkg.version, daily: {}, purchases: [],
-}));
+const defaults = require('./validation-config.cjs')(root, pkg.version);
+const channels = defaults.channels;
+fs.writeFileSync(path.join(profile, 'config.json'), JSON.stringify(defaults));
 
 const report = {
   product: pkg.productName, os: process.platform, osRelease: os.release(),
   sourceSha: process.env.VALIDATION_SOURCE_SHA || 'local-preflight',
+  scope: 'unauthenticated UI and official page navigation only',
   accountLogin: 'not performed; user authentication required',
   pointAccrual: 'not performed; authenticated live channel required',
   checks: [], loginPage: { opened: false }, passed: false,
@@ -135,6 +131,9 @@ async function freePort() {
     await until(() => evaluate(main, 'Boolean(window.' + namespace + ' && document.querySelector("#btn-login") && document.querySelector("#composer"))'), 'preload and UI controls');
     const state = await evaluate(main, 'window.' + namespace + '.getState()');
     assert.equal(state.loggedIn, false, 'CI profile must remain unauthenticated');
+    assert.equal(state.farming, false);
+    assert.equal(state.maxWatchers, 1);
+    assert.equal(state.rotation, false);
     assert.equal(state.channels.length, channels.length);
     assert.equal(await evaluate(main, 'document.title'), pkg.productName);
     report.checks.push('packaged application opened', 'expected UI and guarded preload loaded', 'IPC getState passed on the actual platform');
@@ -153,20 +152,21 @@ async function freePort() {
     assert.deepEqual(main.exceptions, [], 'Unexpected main UI JavaScript exception');
 
     await evaluate(main, 'document.querySelector("#btn-login").click()');
-    let loginTarget;
-    try {
-      loginTarget = await until(async () => (await targets()).find(item => {
+    const loginTarget = await until(async () => (await targets()).find(item => {
         try { const url = new URL(item.url); return item.type === 'page' && url.protocol === 'https:' && (url.hostname === platformHost || url.hostname.endsWith('.' + platformHost)) && url.pathname !== '/robots.txt'; }
         catch { return false; }
       }), 'official login navigation', 20000);
-    } catch (error) { report.loginPage = { opened: false, reason: error.message }; }
     if (loginTarget) {
       login = await connect(loginTarget.webSocketDebuggerUrl);
       await login.call('Page.enable');
-      await pause(1500);
+      let formReady = false;
+      try {
+        await until(() => evaluate(login, 'Array.from(document.querySelectorAll("input")).some(input => ["email", "password", "text"].includes(input.type) && input.getBoundingClientRect().width > 0 && input.getBoundingClientRect().height > 0 && input.type !== "search")'), 'login form controls', 30000);
+        formReady = true;
+      } catch { /* Page navigation can be verified without authenticating or claiming form readiness. */ }
       const loginState = await evaluate(login, '({url:location.origin+location.pathname,title:document.title,passwordInput:Boolean(document.querySelector("input[type=password]")),appBridge:Boolean(window.' + namespace + ' && typeof window.' + namespace + '.getState==="function" && typeof window.' + namespace + '.showLogin==="function")})');
       assert.equal(loginState.appBridge, false, 'Remote login page received the application bridge');
-      report.loginPage = { opened: true, ...loginState, authenticated: false };
+      report.loginPage = { opened: true, ...loginState, formReady, authenticated: false };
       report.checks.push('official login window has no application IPC bridge');
       await screenshot(login, 'login.png');
     }
