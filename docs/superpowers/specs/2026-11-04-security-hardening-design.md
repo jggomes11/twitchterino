@@ -2,7 +2,7 @@
 
 Baseline: 0.1.2, commit `05b70cf0fb7c69a733fce4f4adb901a229b5b47d`. Target: `jggomes11/twitchterino`.
 
-Status: proposed; product implementation has not started.
+Status: approved by the user for implementation and fork PRs without further confirmations.
 
 ## Intent and scope
 
