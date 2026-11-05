@@ -1555,48 +1555,52 @@ handleIpc('channel:show', (_e, slug) => {
 });
 handleIpc('chat:send', (_e, { chatroomId, content }) => sendChat(chatroomId, content));
 
-if (!app.requestSingleInstanceLock()) app.quit();
-app.on('second-instance', showMain);
-app.setAppUserModelId('com.vinniisaantos.twitchterino');
+if (!app.requestSingleInstanceLock()) {
+  app.isQuitting = true;
+  app.quit();
+} else {
+  app.on('second-instance', showMain);
+  app.setAppUserModelId('com.vinniisaantos.twitchterino');
 
-app.whenReady().then(() => {
-  loadConfig();
-  setupSession();
-  mainWin = new BrowserWindow({
-    width: 1380, height: 840, minWidth: 820, minHeight: 560, backgroundColor: '#0b0716', title: 'Twitchterino',
-    show: !process.argv.includes('--hidden'),
-    icon: path.join(__dirname, 'build', 'icon.png'),
-    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, sandbox: true, nodeIntegration: false, additionalArguments: ['--app-ui-url=' + UI_DOCUMENT] },
-  });
-  mainWin.setMenuBarVisibility(false);
-  mainWin.loadFile(path.join(__dirname, 'renderer', 'index.html'));
-  mainWin.on('close', (e) => {
-    if (app.isQuitting) return;
-    e.preventDefault();
-    mainWin.hide();
-    if (!config.trayHintShown) {
-      config.trayHintShown = true;
-      saveConfig();
-      notify('O Twitchterino continua juntando pontos', isLinux
-        ? 'Ele fica na bandeja do sistema. Se o ícone não aparecer, abra o Twitchterino de novo pelo menu de apps. Para sair de vez, use Fechar o app em ⚙.'
-        : 'Ele fica na bandeja, perto do relógio. Para sair de vez: botão direito no ícone > Sair.', showMain);
-    }
-  });
-  mainWin.on('query-session-end', () => { app.isQuitting = true; });
-  mainWin.on('session-end', () => { app.isQuitting = true; });
+  app.whenReady().then(() => {
+    loadConfig();
+    setupSession();
+    mainWin = new BrowserWindow({
+      width: 1380, height: 840, minWidth: 820, minHeight: 560, backgroundColor: '#0b0716', title: 'Twitchterino',
+      show: !process.argv.includes('--hidden'),
+      icon: path.join(__dirname, 'build', 'icon.png'),
+      webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, sandbox: true, nodeIntegration: false, additionalArguments: ['--app-ui-url=' + UI_DOCUMENT] },
+    });
+    mainWin.setMenuBarVisibility(false);
+    mainWin.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+    mainWin.on('close', (e) => {
+      if (app.isQuitting) return;
+      e.preventDefault();
+      mainWin.hide();
+      if (!config.trayHintShown) {
+        config.trayHintShown = true;
+        saveConfig();
+        notify('O Twitchterino continua juntando pontos', isLinux
+          ? 'Ele fica na bandeja do sistema. Se o ícone não aparecer, abra o Twitchterino de novo pelo menu de apps. Para sair de vez, use Fechar o app em ⚙.'
+          : 'Ele fica na bandeja, perto do relógio. Para sair de vez: botão direito no ícone > Sair.', showMain);
+      }
+    });
+    mainWin.on('query-session-end', () => { app.isQuitting = true; });
+    mainWin.on('session-end', () => { app.isQuitting = true; });
 
-  createTray();
-  syncKeepAwake();
-  powerMonitor.on('resume', recoverAfterResume);
-  createApiWindow();
-  connectChat();
-  apiReady.then(poll);
-  setInterval(poll, POLL_MS);
-  setInterval(() => send('status', snapshot()), 15 * 1000);
-  setInterval(() => { checkBonusEnding(); updateTray(); }, 30 * 1000);
-  setTimeout(syncPartners, 30 * 1000);
-  setInterval(syncPartners, 6 * 60 * 60 * 1000);
-});
+    createTray();
+    syncKeepAwake();
+    powerMonitor.on('resume', recoverAfterResume);
+    createApiWindow();
+    connectChat();
+    apiReady.then(poll);
+    setInterval(poll, POLL_MS);
+    setInterval(() => send('status', snapshot()), 15 * 1000);
+    setInterval(() => { checkBonusEnding(); updateTray(); }, 30 * 1000);
+    setTimeout(syncPartners, 30 * 1000);
+    setInterval(syncPartners, 6 * 60 * 60 * 1000);
+  });
+}
 
 app.on('before-quit', () => { app.isQuitting = true; });
 app.on('window-all-closed', () => app.quit());

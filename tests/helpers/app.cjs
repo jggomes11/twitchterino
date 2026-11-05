@@ -6,7 +6,7 @@ const { EventEmitter } = require('node:events');
 const { pathToFileURL } = require('node:url');
 const { createRequire } = require('node:module');
 
-function loadApp({ packaged = false, platform = 'win32', configSeed = null } = {}) {
+function loadApp({ packaged = false, platform = 'win32', configSeed = null, singleInstance = true } = {}) {
   const root = path.resolve(__dirname, '../..');
   const state = { scripts: [], requests: [], writes: [], quit: 0, updates: 0, windows: [], ready: [], dialogResponse: 0, sockets: [], timers: [], reloads: [] };
   const cookies = new EventEmitter();
@@ -52,7 +52,7 @@ function loadApp({ packaged = false, platform = 'win32', configSeed = null } = {
   Object.assign(app, {
     commandLine: { appendSwitch() {} }, userAgentFallback: 'Chrome/100 Electron/45', isPackaged: packaged,
     getPath: name => '/fake/' + name, setPath() {}, getVersion: () => JSON.parse(fs.readFileSync(path.join(root, 'package.json'))).version,
-    requestSingleInstanceLock: () => true, quit: () => { state.quit++; }, setAppUserModelId() {}, getAppMetrics: () => [],
+    requestSingleInstanceLock: () => singleInstance, quit: () => { state.quit++; }, setAppUserModelId() {}, getAppMetrics: () => [],
     whenReady: () => ({ then: callback => { state.ready.push(callback); } }),
     getLoginItemSettings: () => ({ openAtLogin: false }), setLoginItemSettings() {},
   });
