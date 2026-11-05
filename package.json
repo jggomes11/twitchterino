@@ -34,6 +34,7 @@
       }
     ],
     "files": [
+      "LICENSE",
       "main.js",
       "preload.js",
       "renderer/**/*",

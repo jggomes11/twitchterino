@@ -17,6 +17,7 @@ for (const name of ['Twitchterino-Setup.exe']) {
 // Directory portability avoids self-extractor cleanup races across processes.
 fs.cpSync(path.join(root, 'dist', 'win-unpacked'), path.join(output, 'portable', 'app'), { recursive: true });
 assert(fs.existsSync(path.join(output, 'portable', 'app', 'Twitchterino.exe')), 'Missing portable application');
+fs.copyFileSync(path.join(root, 'LICENSE'), path.join(output, 'portable', 'LICENSE.txt'));
 for (let profile = 1; profile <= 4; profile++) {
   const launcher = [
     '@echo off', 'setlocal',
