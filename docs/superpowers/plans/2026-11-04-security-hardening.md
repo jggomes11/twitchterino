@@ -56,7 +56,7 @@
 - [x] Resolve vulnerable minimatch copies with compatible tested build-tool changes or targeted overrides to 11.0.1 or newer; never override unrelated legacy major versions globally.
 - [x] Run npm audit --json and npm audit --omit=dev --json; require removal of the known advisory and no production regression.
 - [x] Run npm test, the controlled real-Electron session/redirect/abort fixture where available, and electron-builder --linux --dir --publish never as a packaging smoke check. Report environment limitations precisely.
-- [ ] Commit the policy/dependency changes, request one fresh review of the complete branch, fix important findings with regression tests, then create and attach the fork PR. Do not merge or release.
+- [x] Commit the policy/dependency changes, request one fresh review of the complete branch, fix important findings with regression tests, then create and attach the fork PR. Do not merge or release.
 
 
 Local implementation checks passed: 36 Node tests, the controlled Electron transport fixture, zero full/production npm advisories, and Linux directory packaging with security-module ASAR inspection. Final branch review and PR creation are recorded separately after this checkpoint; live-account and Windows UI validation remain unperformed.
@@ -64,3 +64,5 @@ Local implementation checks passed: 36 Node tests, the controlled Electron trans
 ## Final review correction pass
 
 The fresh review reproduced four important lifecycle gaps. Regression tests first failed for asynchronous store closure after logout (both), delayed Twitch redemption responses, pending Twitch IRC authentication/messages, and account balance mixing (both). The fixes cancel obsolete store callbacks, check redemption/socket generations, close stale chat sockets and select reports by verified account identity. Inactive account reports are archived/restored so a switch does not delete history; ordinary token rotation keeps its baseline. The full suite now passes 36 tests.
+
+Delivery: draft pull request https://github.com/jggomes11/twitchterino/pull/1 targets main in the user-owned fork. No merge or release was performed. Live account and Windows validation remain pending.
