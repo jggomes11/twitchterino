@@ -27,10 +27,7 @@ function launch(profile) {
     const profiles = [];
     for (let index = 1; index <= 4; index++) {
       const profile = path.join(temporary, 'Conta-' + index);
-      fs.mkdirSync(profile);
-      const defaults = require('./validation-config.cjs')(root, pkg.version);
-      defaults.seenDefaults = []; // Startup must write this after acquiring its profile lock.
-      fs.writeFileSync(path.join(profile, 'config.json'), JSON.stringify(defaults));
+      assert(!fs.existsSync(profile), 'First launch must create its own profile directory');
       profiles.push({ path: profile, child: launch(profile) });
     }
     const deadline = Date.now() + 60000;
@@ -49,6 +46,14 @@ function launch(profile) {
     }
     await pause(3000);
     assert(profiles.every(profile => profile.child.exitCode === null), 'Four profiles did not stay open concurrently');
+    const parents = profiles.map(profile => profile.child.pid).join(',');
+    const processes = spawnSync('powershell.exe', ['-NoProfile', '-Command',
+      `Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -in @(${parents}) -and $_.Name -eq 'Twitchterino.exe' } | Select-Object ExecutablePath | ConvertTo-Json -Compress`,
+    ], { encoding: 'utf8' });
+    assert.equal(processes.status, 0, 'Could not inspect portable child processes');
+    const paths = [].concat(JSON.parse(processes.stdout)).map(item => item.ExecutablePath);
+    assert.equal(paths.length, 4, 'Expected one native application process per portable launcher');
+    assert.equal(new Set(paths.map(file => file.toLowerCase())).size, 4, 'Portable launches share an extraction directory');
     const duplicate = launch(profiles[0].path);
     const duplicateDeadline = Date.now() + 30000;
     while (duplicate.exitCode === null && !duplicate.launchError && Date.now() < duplicateDeadline) await pause(250);
@@ -56,6 +61,8 @@ function launch(profile) {
     assert.equal(duplicate.exitCode, 0, 'Opening an existing profile did not exit cleanly');
     assert(profiles.every(profile => profile.child.exitCode === null), 'Duplicate launch stopped an existing profile');
     report.simultaneousProfiles = profiles.length;
+    report.firstLaunchCreatedProfiles = true;
+    report.uniqueExtractionDirectories = paths.length;
     report.sameProfileSecondLaunchExited = true;
     report.passed = true;
     console.log(JSON.stringify(report, null, 2));

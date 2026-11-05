@@ -64,6 +64,7 @@
       "runAfterFinish": true
     },
     "portable": {
+      "unpackDirName": true,
       "artifactName": "Twitchterino-portatil.exe"
     },
     "linux": {
