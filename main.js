@@ -12,6 +12,7 @@ const { createHash } = require('node:crypto');
 const { createPlatformClient } = require('./security/platform');
 const { readCookie } = require('./security/requests');
 const { selectReportAccount } = require('./security/accounts');
+const { chestClickScript } = require('./security/chest');
 const { createIpcRegistrar } = require('./security/ipc');
 const { pathToFileURL } = require('node:url');
 const UI_DOCUMENT = pathToFileURL(path.join(__dirname, 'renderer', 'index.html')).href;
@@ -56,6 +57,7 @@ function cancelAccountWindows() {
 function resetAccountRuntime() {
   cancelAccountWindows();
   for (const slug of [...watchers.keys()]) stopWatcher(slug);
+  confirmedChestClaims.clear();
   status.clear();
 }
 
@@ -628,56 +630,79 @@ async function refreshAll() {
       s.claim = claim || null;
       const p = cp ? cp.balance : null;
       if (verifiedAccountGeneration !== generation) { s.points = null; s.bonusTier = null; s.targetTier = null; }
-      if (typeof p === 'number') {
-        if (s.points != null && p > s.points) {
-          s.gainedTotal = (s.gainedTotal || 0) + (p - s.points);
-          if (watchers.has(slug)) s.lastGainAt = Date.now();
-          addDaily(p - s.points);
-        }
-        if (s.points != null && p < s.points) registerDrop(slug, s, s.points - p);
-        s.points = p;
-        checkBonus(slug, s);
-      }
+      updateChannelBalance(slug, s, p);
       status.set(slug, s);
     });
   }
   // Baú de bônus: com "Pegar baú sozinho" o app clica nele; sem isso, um aviso só para todos os
   // canais, no máximo a cada 15 min, e a pessoa abre e clica.
-  if (config.autoChest && loggedIn) {
-    for (const slug of config.channels) if ((status.get(slug) || {}).claim) queueChest(slug);
-  } else if (fresh.length && config.notifyChest && Date.now() - chestNotifiedAt > 15 * 60 * 1000) {
+  if (!config.autoChest && fresh.length && config.notifyChest && Date.now() - chestNotifiedAt > 15 * 60 * 1000) {
     chestNotifiedAt = Date.now();
     const names = fresh.map((slug) => (status.get(slug) || {}).displayName || slug);
     notify(`🎁 Baú de bônus em ${names.slice(0, 3).join(', ')}${names.length > 3 ? '…' : ''}`, 'Clique para abrir o chat e pegar os pontos extras.', () => openStore(fresh[0]));
   }
 }
 
-// Pega o baú de bônus: abre o chat do canal numa janela escondida, espera o botão do baú
-// aparecer (o mesmo que você clicaria ao lado do saldo), clica uma vez e fecha. Não gasta pontos.
-// Os baús vão numa fila, um de cada vez: várias janelas de chat abrindo juntas deixavam a página
-// lenta e o botão não aparecia a tempo. Cada tentativa fica em chest-log.jsonl (pasta de dados).
+function updateChannelBalance(slug, s, points) {
+  if (typeof points !== 'number' || !Number.isFinite(points)) return;
+  if (s.points != null && points > s.points) {
+    s.gainedTotal = (s.gainedTotal || 0) + points - s.points;
+    if (watchers.has(slug)) s.lastGainAt = Date.now();
+    addDaily(points - s.points);
+  }
+  if (s.points != null && points < s.points) registerDrop(slug, s, s.points - points);
+  s.points = points;
+  checkBonus(slug, s);
+}
+
+// Only the platform's bonus button is clicked; rewards are never selected.
+// Account data is checked again through read-only API calls before recording success.
 const chestQueue = [];
 const chestWindows = new Set();
+const confirmedChestClaims = new Set();
 let chestBusy = null;
 const lastClaimTry = new Map();
 const CHEST_RETRY_MS = 90 * 1000;
+const FIND_CHEST = slug => chestClickScript(`${TWITCH}/popout/${slug}/chat?popout=`);
+
+function assertChestOwner(owner) {
+  if (!config.autoChest || sessionTransition || !loggedIn || sessionChecking
+    || verifiedAccountGeneration !== apiClient.generation || config.reportAccount !== owner.account
+    || !owner.digest || verifiedTokenDigest !== owner.digest) throw new Error('Session changed');
+}
+
+async function waitForChestOwner(owner) {
+  // Give the selected-cookie read the same bounded budget as an API request.
+  // No account work is accepted while verification is pending.
+  for (let elapsed = 0; elapsed < 20000 && sessionChecking && !sessionTransition; elapsed += 25) await new Promise(resolve => setTimeout(resolve, 25));
+  assertChestOwner(owner);
+}
+
+function queueAvailableChests() {
+  if (!config.autoChest || !loggedIn || sessionChecking || sessionTransition || verifiedAccountGeneration !== apiClient.generation) return;
+  for (const slug of config.channels) if ((status.get(slug) || {}).claim) queueChest(slug);
+  void runChestQueue();
+}
 
 function queueChest(slug) {
-  if (chestBusy === slug || chestQueue.includes(slug) || Date.now() - (lastClaimTry.get(slug) || 0) < CHEST_RETRY_MS) return;
+  const claim = (status.get(slug) || {}).claim;
+  if (!claim || confirmedChestClaims.has(claim) || chestBusy === slug || chestQueue.includes(slug)
+    || Date.now() - (lastClaimTry.get(slug) || 0) < CHEST_RETRY_MS) return;
   chestQueue.push(slug);
-  runChestQueue();
+  void runChestQueue();
 }
 
 async function runChestQueue() {
-  if (chestBusy) return;
+  if (chestBusy || !config.autoChest || sessionChecking || !loggedIn) return;
   const slug = chestQueue.shift();
   if (!slug) return;
+  if (!config.channels.includes(slug) || !(status.get(slug) || {}).claim) { void runChestQueue(); return; }
   chestBusy = slug;
   send('status', snapshot());
   try { await claimChest(slug); } catch {}
   chestBusy = null;
   send('status', snapshot());
-  runChestQueue();
+  void runChestQueue();
 }
 
 function chestLog(entry) {
@@ -688,31 +713,40 @@ function chestLog(entry) {
   } catch {}
 }
 
-// Procura o botão do baú do jeito mais firme possível: o ícone do baú, ou um botão do resumo de
-// pontos com nome de "resgatar/claim". Devolve o que achou para o registro.
-const FIND_CHEST = `new Promise((done) => {
-  let n = 0;
-  const find = () => {
-    const icon = document.querySelector('.claimable-bonus__icon');
-    if (icon && icon.closest('button')) return icon.closest('button');
-    const box = document.querySelector('[data-test-selector="community-points-summary"]');
-    const buttons = [...(box || document).querySelectorAll('button')];
-    return buttons.find((b) => /claim bonus|resgatar b[oô]nus|coletar|claim/i.test(b.getAttribute('aria-label') || ''));
-  };
-  const t = setInterval(() => {
-    const btn = find();
-    if (btn) { clearInterval(t); btn.click(); return done({ ok: true, tries: n, label: btn.getAttribute('aria-label') || '' }); }
-    if (++n > 80) {
-      clearInterval(t);
-      const box = document.querySelector('[data-test-selector="community-points-summary"]');
-      done({ ok: false, tries: n, summary: !!box, labels: box ? [...box.querySelectorAll('button')].map((b) => b.getAttribute('aria-label') || '').slice(0, 5) : [], url: location.href });
+async function confirmChestClaim(slug, claim, before, owner) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await waitForChestOwner(owner);
+    let response;
+    try { response = await gql(`query ChestClaimConfirmation{currentUser{id login} channel:user(login:${JSON.stringify(slug)}){channel{self{communityPoints{balance availableClaim{id}}}}}}`); }
+    catch (error) {
+      await waitForChestOwner(owner);
+      if (error.message === 'Session changed' && attempt < 4) continue;
+      throw error;
     }
-  }, 500);
-})`;
+    await waitForChestOwner(owner);
+    const { status: code, json } = response;
+    const user = json?.data?.currentUser;
+    const id = String(user?.id || '');
+    const account = /^[1-9][0-9]*$/.test(id) ? 'id:' + id : user?.login ? 'login:' + user.login.toLowerCase() : null;
+    if (code !== 200 || !user || account !== owner.account || json.errors?.length) throw new Error('Confirmation failed');
+    const points = json.data.channel?.channel?.self?.communityPoints;
+    const noLongerAvailable = points && Object.prototype.hasOwnProperty.call(points, 'availableClaim')
+      && (points.availableClaim === null || (typeof points.availableClaim?.id === 'string' && points.availableClaim.id !== claim));
+    if (noLongerAvailable && typeof points.balance === 'number' && points.balance >= before + 50) return points.balance;
+    if (attempt < 4) await new Promise(resolve => setTimeout(resolve, 750));
+  }
+  throw new Error('Claim not confirmed');
+}
 
 async function claimChest(slug) {
-  const generation = apiClient.generation;
+  const owner = { account: config.reportAccount, digest: verifiedTokenDigest };
+  assertChestOwner(owner);
+  const initial = status.get(slug);
+  const claim = initial?.claim;
+  if (!claim || typeof initial.points !== 'number' || confirmedChestClaims.has(claim)) return false;
+  const before = initial.points;
   lastClaimTry.set(slug, Date.now());
+  initial.chestError = null;
   const started = Date.now();
   const win = new BrowserWindow({
     width: 400, height: 640, x: 0, y: 0, show: false, skipTaskbar: true, focusable: false, type: 'toolbar', opacity: 0,
@@ -720,29 +754,37 @@ async function claimChest(slug) {
   });
   win.webContents.setAudioMuted(true);
   chestWindows.add(win);
-  // Como as lives ocultas: a janela existe na tela (transparente e sem cliques), para a página
-  // da Twitch se comportar como uma aba aberta.
   win.setIgnoreMouseEvents(true);
   if (!isLinux) win.showInactive();
   let result = { ok: false };
   try {
     await withTimeout(win.loadURL(`${TWITCH}/popout/${slug}/chat?popout=`), 45 * 1000);
-    result = await withTimeout(win.webContents.executeJavaScript(FIND_CHEST), 50 * 1000);
-    assertSession(generation);
-    if (result.ok) {
-      await new Promise((r) => setTimeout(r, 3000)); // deixa a Twitch confirmar antes de fechar
-      assertSession(generation);
-      const s = status.get(slug) || {};
-      s.claim = null;
-      config.chestsClaimed = (config.chestsClaimed || 0) + 1;
-      config.chestDaily = config.chestDaily || {};
-      const k = dayKey(Date.now());
-      config.chestDaily[k] = (config.chestDaily[k] || 0) + 1;
-      configDirty = true;
-      send('toast', `🎁 Baú pego em ${s.displayName || slug}: +50 pts`);
-    }
-  } catch (e) {
-    result = { ok: false, error: String(e.message || e) };
+    await waitForChestOwner(owner);
+    const clicked = await withTimeout(win.webContents.executeJavaScript(FIND_CHEST(slug), true), 50 * 1000);
+    await waitForChestOwner(owner);
+    if (!clicked?.clicked) throw new Error(clicked?.reason === 'bonus-button-unavailable' ? 'Bonus unavailable' : 'Bonus button not found');
+    await confirmChestClaim(slug, claim, before, owner);
+    await waitForChestOwner(owner);
+    const current = status.get(slug);
+    if (!current) throw new Error('Session changed');
+    if (current.claim === claim) current.claim = null;
+    current.chestError = null;
+    confirmedChestClaims.add(claim);
+    if (confirmedChestClaims.size > 256) confirmedChestClaims.delete(confirmedChestClaims.values().next().value);
+    config.chestsClaimed = (config.chestsClaimed || 0) + 1;
+    config.chestDaily = config.chestDaily || {};
+    const key = dayKey(Date.now());
+    config.chestDaily[key] = (config.chestDaily[key] || 0) + 1;
+    configDirty = false;
+    saveConfig();
+    send('toast', `🎁 Baú confirmado em ${current.displayName || slug}`);
+    result = { ok: true };
+    void poll();
+  } catch (error) {
+    const code = ['Session changed', 'Bonus unavailable', 'Bonus button not found', 'Claim not confirmed', 'Confirmation failed', 'timeout'].includes(error.message) ? error.message : 'Claim failed';
+    result = { ok: false, error: code, sameAccount: config.reportAccount === owner.account, sameCachedToken: verifiedTokenDigest === owner.digest, accountVerified: loggedIn && verifiedAccountGeneration === apiClient.generation, sessionChecking };
+    const current = status.get(slug);
+    if (current && config.reportAccount === owner.account && current.claim === claim && config.autoChest) current.chestError = code;
   } finally {
     chestWindows.delete(win);
     if (!win.isDestroyed()) win.destroy();
@@ -1232,7 +1274,7 @@ function snapshot() {
         watching: watchers.has(slug), ageGate: !!s.ageGate, earning: earningState(slug, now),
         following: s.following ?? null, subscribed: !!s.subscribed, multiplier: s.multiplier || 1,
         gained: confirmedAccount ? s.gainedTotal || 0 : 0, goal: rank ? rank.goal : null, goalLeft: rank ? rank.left : null,
-        costs: costsOf(s), targetCost: targetCost(s), hasBonus: hasBonus(s), rewardsLoaded: !!s.rewards, chest: !!s.claim, chestState: chestBusy === slug ? 'claiming' : chestQueue.includes(slug) ? 'queued' : null,
+        costs: costsOf(s), targetCost: targetCost(s), hasBonus: hasBonus(s), rewardsLoaded: !!s.rewards, chest: !!s.claim, chestState: chestBusy === slug ? 'claiming' : chestQueue.includes(slug) ? 'queued' : config.autoChest && s.chestError && s.claim ? 'retry' : null, chestError: s.chestError || null,
         rewards: (s.rewards || []).filter((r) => r.available).map((r) => ({ kind: r.kind, hours: r.hours, cost: r.cost })),
         priceChange: s.priceChange && now - s.priceChange.at < DAY_MS ? s.priceChange.text : null,
         pointsEnabled: s.pointsEnabled !== false,
@@ -1272,6 +1314,7 @@ async function poll() {
     sessionChecking = false;
     if (loggedIn) verifiedTokenDigest = tokenDigest(token);
     if (!token) { username = null; verifiedTokenDigest = null; }
+    queueAvailableChests();
     if (configDirty) { configDirty = false; saveConfig(); }
     if (config.channels.length && config.channels.every((slug) => (status.get(slug) || {}).error) && !apiWin.isVisible()) loadApi(LIGHT_URL);
     advanceLimitTest();
@@ -1390,7 +1433,12 @@ handleIpc('autostart:set', (_e, on) => { try { setOpenAtLogin(!!on); } catch {} 
 handleIpc('app:quit', quitApp);
 handleIpc('notifyBonus:set', (_e, on) => { config.notifyBonus = !!on; saveConfig(); return snapshot(); });
 handleIpc('notifyChest:set', (_e, on) => { config.notifyChest = !!on; saveConfig(); return snapshot(); });
-handleIpc('autoChest:set', (_e, on) => { config.autoChest = !!on; saveConfig(); if (on) poll(); return snapshot(); });
+handleIpc('autoChest:set', (_e, on) => {
+  config.autoChest = on; saveConfig();
+  if (on) { queueAvailableChests(); void poll(); }
+  else { chestQueue.length = 0; for (const win of chestWindows) if (!win.isDestroyed()) win.destroy(); }
+  return snapshot();
+});
 handleIpc('notifyChat:set', (_e, on) => { config.notifyChat = !!on; saveConfig(); return snapshot(); });
 handleIpc('sleepMode:set', (_e, on) => { config.sleepMode = !!on; saveConfig(); return snapshot(); });
 handleIpc('favorite:toggle', (_e, slug) => {

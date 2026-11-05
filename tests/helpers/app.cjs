@@ -85,7 +85,7 @@ function loadApp({ packaged = false, platform = 'win32', configSeed = null } = {
     clearTimeout(timer) { if (timer) timer.cancelled = true; }, setInterval: () => 1, clearInterval() {}, setImmediate, queueMicrotask,
   };
   vm.createContext(context);
-  const exported = 'module.exports = { query: typeof gql === "function" ? gql : kickFetch, poll, snapshot, setupSession, sendChat: typeof sendChat === "function" ? sendChat : null, watchRedemptions: typeof watchRedemptions === "function" ? watchRedemptions : null, setUsername(value) { username = value; }, setup(main, api) { mainWin = main; apiWin = api; apiReady = Promise.resolve(); }, status, config, get client() { return typeof apiClient === "undefined" ? null : apiClient; } };';
+  const exported = 'module.exports = { query: typeof gql === "function" ? gql : kickFetch, poll, snapshot, setupSession, sendChat: typeof sendChat === "function" ? sendChat : null, watchRedemptions: typeof watchRedemptions === "function" ? watchRedemptions : null, setUsername(value) { username = value; }, setup(main, api) { mainWin = main; apiWin = api; apiReady = Promise.resolve(); }, chestScript(slug) { return typeof FIND_CHEST === "function" ? FIND_CHEST(slug) : FIND_CHEST; }, status, config, get client() { return typeof apiClient === "undefined" ? null : apiClient; } };';
   vm.runInContext(fs.readFileSync(path.join(root, 'main.js'), 'utf8') + exported, context, { filename: path.join(root, 'main.js') });
   const main = new Window();
   main.loadFile(path.join(root, 'renderer/index.html'));

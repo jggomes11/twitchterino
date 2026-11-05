@@ -106,11 +106,19 @@ function avatar(ch, size = '') {
 // Baú de bônus: mostra se o app está pegando agora, se está na fila ou esperando a próxima tentativa.
 function chestButton(ch) {
   const auto = !!state.autoChest;
-  const label = ch.chestState === 'claiming' ? '🎁 pegando…' : ch.chestState === 'queued' ? '🎁 na fila' : '🎁';
+  const failure = {
+    'Bonus button not found': 'O botão do baú não apareceu na Twitch.',
+    'Bonus unavailable': 'A Twitch mostrou o botão do baú indisponível.',
+    'Claim not confirmed': 'A Twitch ainda não confirmou o bônus no saldo.',
+    'Confirmation failed': 'Não foi possível confirmar o resgate na Twitch.',
+    'Session changed': 'A sessão mudou durante o resgate.',
+  }[ch.chestError] || 'O resgate não foi confirmado.';
+  const label = ch.chestState === 'claiming' ? '🎁 pegando…' : ch.chestState === 'queued' ? '🎁 na fila' : ch.chestState === 'retry' ? '🎁 tentar novamente' : '🎁';
   const c = el('button', 'chest-mini' + (ch.chestState ? ` ${ch.chestState}` : ''), label);
   c.title = !auto ? 'Baú de bônus: clique para abrir o chat e pegar +50'
     : ch.chestState === 'claiming' ? 'O app está pegando este baú agora'
     : ch.chestState === 'queued' ? 'Na fila: o app pega um baú de cada vez'
+    : ch.chestState === 'retry' ? failure + ' O app tentará novamente; clique para conferir na Twitch.'
     : 'Baú de bônus: o app vai pegar sozinho em instantes. Clique para abrir o chat e pegar agora.';
   c.onclick = (e) => { e.stopPropagation(); window.tt.openStore(ch.slug); };
   return c;

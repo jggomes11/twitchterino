@@ -15,6 +15,12 @@ app.whenReady().then(async () => {
       if (req.url === '/redirect') { res.writeHead(302, { Location: '/leak' }); return res.end(); }
       if (req.url === '/leak') { leaked++; return res.end('{}'); }
       if (req.url === '/slow') return;
+      if (req.url === '/bonus-fixture') {
+        res.setHeader('Content-Type', 'text/html');
+        return res.end(`<html><body><script>window.bonusClicks=0;window.rewardClicks=0;</script>
+          <button id="reward" aria-label="Claim reward" onclick="rewardClicks++">Paid reward</button>
+          <button id="bonus" onclick="bonusClicks++"><span class="claimable-bonus__icon">Bonus</span></button></body></html>`);
+      }
       observed = { cookie: req.headers.cookie, authorization: req.headers.authorization };
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Content-Type', 'application/json'); res.end('{"points":42}');
@@ -73,6 +79,23 @@ app.whenReady().then(async () => {
     assert.equal(cookieChanges[0]?.removed, true);
     assert.equal(cookieChanges[1]?.removed, false);
     console.log('Native same-value cookie overwrite emits a transient removal followed by insertion.');
+    if (process.platform === 'win32') {
+      const { BrowserWindow } = require('electron');
+      const { chestClickScript } = require('../security/chest');
+      const page = new BrowserWindow({ show: false, webPreferences: { session: ses, sandbox: true, contextIsolation: true, nodeIntegration: false } });
+      try {
+        const address = origin + '/bonus-fixture';
+        await page.loadURL(address);
+        const clicked = await page.webContents.executeJavaScript(chestClickScript(address, 1000), true);
+        assert.equal(clicked.clicked, true);
+        assert.equal(await page.webContents.executeJavaScript('window.bonusClicks'), 1);
+        await page.webContents.executeJavaScript('document.querySelector("#bonus").remove()');
+        const absent = await page.webContents.executeJavaScript(chestClickScript(address, 1000), true);
+        assert.equal(absent.clicked, false);
+        assert.equal(await page.webContents.executeJavaScript('window.rewardClicks'), 0);
+        console.log('Native chest UI fixture: only the bonus button is clicked; generic reward button remains untouched.');
+      } finally { page.destroy(); }
+    }
     await ses.clearStorageData();
     console.log('Electron transport fixture: session cookies, fixed destination, redirect refusal, timeout and invalidation passed.');
     server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
