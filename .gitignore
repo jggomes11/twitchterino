@@ -3,3 +3,6 @@ dist/
 *.log
 .claude/
 dist-linux/
+
+# Generated Windows test builds and unauthenticated CI evidence.
+validation-output/

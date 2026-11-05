@@ -1,0 +1,64 @@
+name: Windows validation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Native Windows UI and packaging
+    runs-on: windows-2022
+    timeout-minutes: 25
+    env:
+      VALIDATION_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts
+      - name: Install the pinned Electron runtime
+        run: node node_modules/electron/install.js
+      - name: Run security regression tests
+        run: npm test
+      - name: Validate native Electron session transport
+        run: npm run test:electron
+      - name: Audit dependencies
+        run: |
+          npm audit
+          npm audit --omit=dev
+      - name: Package Windows without publishing
+        id: package
+        run: npm run dist -- --dir --publish never
+      - name: Validate packaged UI and official login navigation
+        run: node scripts/validate-desktop.cjs
+      - name: Prepare isolated manual validation bundle
+        if: always() && steps.package.outcome == 'success'
+        run: node scripts/package-windows-validation.cjs
+      - name: Verify the manual bundle launcher
+        if: always() && steps.package.outcome == 'success'
+        run: ./validation-output/Start-WindowsValidation.ps1 -CheckOnly
+      - name: Preserve Windows evidence and validation build
+        # The launcher checks hashes without opening another GUI during CI.
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-validation-${{ github.event.pull_request.head.sha || github.sha }}
+          path: validation-output/
+          retention-days: 3
+          include-hidden-files: true
+          if-no-files-found: warn
+
