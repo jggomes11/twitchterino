@@ -86,6 +86,9 @@ app.whenReady().then(async () => {
       // All HTTPS requests in this empty fixture partition are handled locally.
       // The synthetic watch event never reaches Twitch or any real account.
       const metricsSession = session.fromPartition('metrics-fixture-' + process.pid);
+      // Fail closed if a custom handler stops intercepting: no fixture request
+      // can reach the real HTTPS endpoint through this loopback-only proxy.
+      await metricsSession.setProxy({ proxyRules: '127.0.0.1:9' });
       let intercepted = 0;
       await metricsSession.protocol.handle('https', request => {
         const url = new URL(request.url);

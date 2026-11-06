@@ -939,8 +939,8 @@ function instrumentWatcher(slug, win) {
   const dbg = win.webContents.debugger;
   const diagnostics = createWatchDiagnostics({ now: () => Date.now() });
   watcherDiagnostics.set(win, diagnostics);
-  win.webContents.on('did-start-navigation', (_e, _url, isInPlace, isMainFrame) => {
-    if (isMainFrame && !isInPlace) diagnostics.navigation();
+  win.webContents.on('did-start-navigation', details => {
+    if (details.isMainFrame && !details.isSameDocument) diagnostics.navigation();
   });
   try { dbg.attach('1.3'); diagnostics.attached(true); } catch { return; }
   dbg.on('detach', () => diagnostics.attached(false));

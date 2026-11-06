@@ -34,6 +34,12 @@ jobs:
         run: node node_modules/electron/install.js
       - name: Run security regression tests
         run: npm test
+      - name: Verify private diagnostic export on Windows PowerShell 5.1
+        shell: powershell
+        run: ./scripts/test-points-diagnostics.ps1
+      - name: Verify private diagnostic export on PowerShell 7
+        shell: pwsh
+        run: ./scripts/test-points-diagnostics.ps1
       - name: Validate native Electron session transport
         run: npm run test:electron
       - name: Validate public Twitch transport without an account

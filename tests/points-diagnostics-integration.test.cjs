@@ -82,3 +82,20 @@ test('an actual initial-credit retry is recorded without replacing the healthy p
   assert.equal(typeof d.recovery.lastAttemptAt, 'number');
   assert.equal(d.recovery.nextAttemptAt - d.recovery.lastAttemptAt, 26 * 60000);
 });
+
+test('Electron45 navigation details discard obsolete requests only for a new main document', async () => {
+  const f = fixture(); await f.poll();
+  const wc = f.player(f.target).webContents;
+  wc.debugger.emit('message', {}, 'Network.requestWillBeSent', { requestId: 'pending',
+    request: { url: 'https://spade.twitch.tv/track', method: 'POST' } });
+  wc.emit('did-start-navigation', { isMainFrame: false, isSameDocument: false, url: 'SECRET_SUBFRAME', frame: null });
+  wc.emit('did-start-navigation', { isMainFrame: true, isSameDocument: true, url: 'SECRET_HASH', frame: null });
+  await f.poll();
+  assert.equal(f.log().channels[f.target].diagnostics.tracking.pendingRequests, 1);
+  wc.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false, url: 'SECRET_NAV', frame: null });
+  await f.poll();
+  const tracking = f.log().channels[f.target].diagnostics.tracking;
+  assert.equal(tracking.pendingRequests, 0);
+  assert.equal(tracking.navigations, 1);
+  assert.doesNotMatch(JSON.stringify(tracking), /SECRET/);
+});

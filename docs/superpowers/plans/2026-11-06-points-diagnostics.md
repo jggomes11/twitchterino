@@ -41,6 +41,6 @@
 
 **Interfaces:** extractor parameters `-ProfileCommit <12hex>`, `-Channels <slug[]>`, `-Samples <1..120>` default20. Emits JSON: bundle source, profile prefix, report schema, allowlisted per-sample modes and channels aliased by selected order. Reads no profile files except points-log.jsonl.
 
-- [ ] Write and run native Windows fixture tests for paired selection/anonymization, skipped malformed final line and safe missing-profile output; observe RED before implementation.
-- [ ] Implement exporter, package it and add native workflow verification. Document evidence limits and exact profile-reuse commands.
+- [x] Write and run fixture tests for paired selection/anonymization, skipped malformed final line and safe missing-profile output; observe RED before implementation. Local PowerShell7.6.9 RED/GREEN verified; Windows5.1/7 execution in CI.
+- [x] Implement exporter, package it and add native workflow verification. Document evidence limits and exact profile-reuse commands.
 - [ ] Run all checks, request one fresh whole-change review, address important findings with RED/GREEN tests, push existing branch and verify Windows artifact/source hashes. Keep PR draft and provide diagnostic test instructions.
