@@ -7,3 +7,6 @@ dist-linux/
 # Generated Windows test builds and unauthenticated CI evidence.
 validation-output/
 release-output/
+
+# Isolated development worktrees.
+.worktrees/
