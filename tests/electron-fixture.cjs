@@ -1,11 +1,13 @@
 'use strict';
 // Controlled main-process transport fixture: no real platform or account is contacted.
-const { app, session } = require('electron');
+const { app, session, BrowserWindow } = require('electron');
 const assert = require('node:assert/strict');
 const http = require('node:http');
 const { createSessionClient, readCookie } = require('../security/requests');
 
 app.setPath('userData', process.env.SECURITY_FIXTURE_DATA);
+// This runner owns shutdown across multiple sequential fixture windows.
+app.on('window-all-closed', () => {});
 app.whenReady().then(async () => {
   let server;
   try {
@@ -79,16 +81,23 @@ app.whenReady().then(async () => {
     assert.equal(cookieChanges[0]?.removed, true);
     assert.equal(cookieChanges[1]?.removed, false);
     console.log('Native same-value cookie overwrite emits a transient removal followed by insertion.');
-    if (process.platform === 'win32') {
-      const { BrowserWindow } = require('electron');
-      const { chestClickScript } = require('../security/chest');
+    {
       const { createWatchDiagnostics } = require('../security/points-diagnostics');
+      const metricsStep = async (label, operation) => {
+        console.log('Metrics fixture:', label);
+        let timer;
+        try {
+          return await Promise.race([operation(), new Promise((_resolve, reject) => {
+            timer = setTimeout(() => reject(new Error('Metrics fixture timeout: ' + label)), 7000);
+          })]);
+        } finally { clearTimeout(timer); }
+      };
       // All HTTPS requests in this empty fixture partition are handled locally.
       // The synthetic watch event never reaches Twitch or any real account.
       const metricsSession = session.fromPartition('metrics-fixture-' + process.pid);
       // Fail closed if a custom handler stops intercepting: no fixture request
       // can reach the real HTTPS endpoint through this loopback-only proxy.
-      await metricsSession.setProxy({ proxyRules: '127.0.0.1:9' });
+      await metricsStep('configure loopback-only proxy', () => metricsSession.setProxy({ proxyRules: '127.0.0.1:9' }));
       let intercepted = 0;
       await metricsSession.protocol.handle('https', request => {
         const url = new URL(request.url);
@@ -103,16 +112,18 @@ app.whenReady().then(async () => {
       });
       const metricsPage = new BrowserWindow({ show: false, webPreferences: { session: metricsSession, sandbox: true, contextIsolation: true, nodeIntegration: false } });
       try {
+        // Initialize the first renderer before awaiting CDP commands; awaiting
+        // Network.enable on an unused about:blank window can otherwise stall.
+        await metricsStep('load local protocol document', () => metricsPage.loadURL('https://www.twitch.tv/fixture'));
         const diagnostics = createWatchDiagnostics();
         const dbg = metricsPage.webContents.debugger;
         dbg.attach('1.3'); diagnostics.attached(true);
         dbg.on('message', (_e, method, params) => diagnostics.observe(method, params));
-        await dbg.sendCommand('Network.enable'); diagnostics.enabled(true);
-        await metricsPage.loadURL('https://www.twitch.tv/fixture');
+        await metricsStep('enable network observer', () => dbg.sendCommand('Network.enable')); diagnostics.enabled(true);
         const body = 'data=' + encodeURIComponent(Buffer.from(JSON.stringify([{ event: 'minute-watched', properties: { user_id: 'FAKE_DIAGNOSTIC_USER' } }])).toString('base64'));
-        assert.equal(await metricsPage.webContents.executeJavaScript(`fetch('https://spade.twitch.tv/track', {method:'POST', body:${JSON.stringify(body)}}).then(r => r.status)`), 204);
+        assert.equal(await metricsStep('observe local-only watch request', () => metricsPage.webContents.executeJavaScript(`fetch('https://spade.twitch.tv/track', {method:'POST', body:${JSON.stringify(body)}}).then(r => r.status)`)), 204);
         const deadline = Date.now() + 5000;
-        while (diagnostics.snapshot().pendingRequests && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+        while ((diagnostics.snapshot().responses < 1 || diagnostics.snapshot().pendingRequests) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
         const observedMetrics = diagnostics.snapshot();
         assert.equal(intercepted, 1);
         assert.equal(observedMetrics.minuteWatchedEvents, 1);
@@ -121,6 +132,9 @@ app.whenReady().then(async () => {
         assert.doesNotMatch(JSON.stringify(observedMetrics), /FAKE_DIAGNOSTIC_USER|postData|https:/);
         console.log('Native metrics observer: local-only watch-minute request/response classified without persisting request content.');
       } finally { metricsPage.destroy(); metricsSession.protocol.unhandle('https'); }
+    }
+    if (process.platform === 'win32') {
+      const { chestClickScript } = require('../security/chest');
       const page = new BrowserWindow({ show: false, webPreferences: { session: ses, sandbox: true, contextIsolation: true, nodeIntegration: false } });
       try {
         const address = origin + '/bonus-fixture';

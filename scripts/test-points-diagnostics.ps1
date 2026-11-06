@@ -42,6 +42,26 @@ try {
     if ($Missing.error -ne 'profile-log-not-found') { throw 'Missing profile was not reported safely' }
     $Newest = (& $Exporter -Samples 10 | Out-String) | ConvertFrom-Json
     if ($Newest.profile -ne $ProfileId) { throw 'Automatic profile discovery failed' }
+    # Recognized leaf names must not allow objects, arrays or arbitrary strings.
+    $Target.points = @{token='SECRET_NESTED_POINTS';url='https://private.example'}
+    $Target.watching = 'SECRET_BOOLEAN'
+    $Target.earning = 'SECRET_ENUM'
+    $Target.video.time = @('SECRET_ARRAY')
+    $Target.diagnostics.page.visibility = @{token='SECRET_VISIBILITY'}
+    $Target.diagnostics.tracking.lastStatus = @{token='SECRET_STATUS'}
+    $Target.diagnostics.recovery.attempts = 'SECRET_NUMBER'
+    @{t=@{token='SECRET_TIMESTAMP'};loggedIn=@{token='SECRET_LOGIN_OBJECT'};channels=@{rodil=$Target}} |
+        ConvertTo-Json -Depth 10 -Compress | Set-Content -LiteralPath $Log -Encoding UTF8
+    $HostileText = (& $Exporter -ProfileCommit $ProfileId -Channels rodil | Out-String).Trim()
+    if ($HostileText -match 'SECRET|private.example|"token"|"url"') { throw 'Recognized leaves disclosed unexpected nested values' }
+    $Hostile = $HostileText | ConvertFrom-Json
+    if ($Hostile.error -or @($Hostile.samples).Count -ne 1) { throw 'Invalid leaf types should be redacted without losing the sample' }
+    if ($null -ne $Hostile.samples[0].channels.C1.points -or $null -ne $Hostile.samples[0].loggedIn) { throw 'Invalid scalar values were not replaced with null' }
+    @{sourceSha=@($SourceSha,'SECRET_MANIFEST_ARRAY')} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Bundle 'build-info.json') -Encoding UTF8
+    $BadManifestText = (& $Exporter -ProfileCommit $ProfileId | Out-String).Trim()
+    if ($BadManifestText -match 'SECRET') { throw 'Manifest source disclosed unexpected array values' }
+    $BadManifest = $BadManifestText | ConvertFrom-Json
+    if ($null -ne $BadManifest.source) { throw 'Malformed manifest source must be null' }
     Write-Host 'Points diagnostic exporter: paired aliases, privacy, malformed final line, missing profile and discovery passed.'
 } finally {
     $env:LOCALAPPDATA = $PreviousLocalAppData

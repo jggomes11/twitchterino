@@ -5,12 +5,47 @@ param(
     [ValidateRange(1,120)][int]$Samples = 20
 )
 $ErrorActionPreference = 'Stop'
+$BooleanFields = @('live','watching','gate','paused','balanceAvailable','apiError','pointsEnabled','manualPlayer',
+    'focused','loginPromptVisible','muted','awaitingInitialCredit','debuggerAttached','networkEnabled',
+    'loggedIn','sessionChecking','farming','watchAll')
+$NumberFields = @('points','watchedMin','time','height','ready','playerSampleAt','volume','attempts','lastAttemptAt',
+    'nextAttemptAt','watchStartedAt','lastGainAt','globalNextAttemptAt','requests','minuteWatchedEvents',
+    'unclassifiedRequests','responses','httpErrors','networkFailures','lastStatus','lastRequestAt',
+    'lastMinuteWatchedAt','lastResponseAt','navigations','lastNavigationAt','pendingRequests','diagnosticsVersion','maxWatchers')
+$Enums = @{earning=@('earning','warming','idle');visibility=@('visible','hidden','unknown')}
+function Select-Scalar([string]$Name, $Value) {
+    if ($null -eq $Value) { return $null }
+    if ($Name -in $BooleanFields) { if ($Value -is [bool]) { return $Value }; return $null }
+    if ($Enums.ContainsKey($Name)) {
+        if ($Value -is [string] -and $Value -in $Enums[$Name]) { return $Value }
+        return $null
+    }
+    if ($Name -eq 't') {
+        if ($Value -is [datetime] -or $Value -is [datetimeoffset]) { return $Value.ToUniversalTime().ToString('o') }
+        if ($Value -is [string] -and $Value -match '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,7})?(Z|[+-]\d{2}:\d{2})$') {
+            $Parsed = [datetimeoffset]::MinValue
+            if ([datetimeoffset]::TryParse($Value, [cultureinfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$Parsed)) { return $Value }
+        }
+        return $null
+    }
+    if ($Name -in $NumberFields -and ($Value -is [int] -or $Value -is [long] -or $Value -is [double] -or $Value -is [decimal])) {
+        $Number = [double]$Value
+        if ([double]::IsNaN($Number) -or [double]::IsInfinity($Number) -or $Number -lt 0 -or $Number -gt 9007199254740991) { return $null }
+        if ($Name -eq 'volume') { if ($Number -le 1) { return $Value }; return $null }
+        if ([Math]::Truncate($Number) -ne $Number) { return $null }
+        if ($Name -eq 'lastStatus' -and ($Number -lt 100 -or $Number -gt 599)) { return $null }
+        if ($Name -eq 'ready' -and $Number -gt 4) { return $null }
+        if ($Name -eq 'height' -and $Number -gt 65535) { return $null }
+        return $Value
+    }
+    return $null
+}
 function Select-Fields($Source, [string[]]$Names) {
     if ($null -eq $Source) { return $null }
     $Selected = [ordered]@{}
     foreach ($Name in $Names) {
         $Property = $Source.PSObject.Properties[$Name]
-        $Selected[$Name] = if ($Property) { $Property.Value } else { $null }
+        $Selected[$Name] = if ($Property) { Select-Scalar $Name $Property.Value } else { $null }
     }
     return [pscustomobject]$Selected
 }
@@ -32,7 +67,7 @@ try {
     $ManifestPath = Join-Path $PSScriptRoot 'build-info.json'
     if (Test-Path -LiteralPath $ManifestPath) {
         $Manifest = Get-Content -LiteralPath $ManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-        if ($Manifest.sourceSha -match '^[0-9a-f]{40}$') { $Source = $Manifest.sourceSha }
+        if ($Manifest.sourceSha -is [string] -and $Manifest.sourceSha -match '^[0-9a-f]{40}$') { $Source = $Manifest.sourceSha }
     }
     $Wanted = @($Channels | ForEach-Object { $_.ToLowerInvariant() } | Select-Object -Unique)
     $Aliases = @{}

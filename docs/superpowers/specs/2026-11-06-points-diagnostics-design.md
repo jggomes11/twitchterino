@@ -15,7 +15,7 @@ Further reload policies have no evidence of benefit. Existing point-history fiel
 - Never persist or log request IDs, URLs, headers, bodies, event properties, cookies, tokens or account identifiers. Request IDs are kept transiently only to associate responses. An accepted HTTP response does not prove credited watch time.
 - Log debugger/network-observer availability, page visibility/focus/login-prompt observations, sample time, fresh-balance availability, API-error boolean, points-enabled setting, recovery flags/count/times and manual-window state. DOM observations do not establish authenticated account identity.
 - Preserve the existing5MiB history rotation. Keep diagnostics local; add no network requests, subscriptions, exports or uploads automatically.
-- The PowerShell extractor selects an existing validation profile by12-hex prefix (or the newest history), reads only points-log.jsonl and the bundle build manifest, and emits allowlisted fields with C1/C2 aliases. It never changes the profile. Optional channel selection allows paired healthy/affected sampling.
+- The PowerShell extractor selects an existing validation profile by12-hex prefix (or the newest history), reads only points-log.jsonl and the bundle build manifest, and emits allowlisted fields with C1/C2 aliases. Leaf values must be booleans, finite bounded numbers, enumerated strings or valid timestamps; unexpected objects/arrays/strings become null. It never changes the profile. Optional channel selection allows paired healthy/affected sampling.
 
 ## Verification
 
