@@ -14,6 +14,7 @@ const { readCookie } = require('./security/requests');
 const { selectReportAccount } = require('./security/accounts');
 const { chestClickScript } = require('./security/chest');
 const { createIpcRegistrar } = require('./security/ipc');
+const { createWatchDiagnostics } = require('./security/points-diagnostics');
 const { pathToFileURL } = require('node:url');
 const UI_DOCUMENT = pathToFileURL(path.join(__dirname, 'renderer', 'index.html')).href;
 
@@ -116,6 +117,7 @@ let mainWin = null;
 let apiWin = null;
 let apiReady = null;
 const watchers = new Map(); // slug -> BrowserWindow
+const watcherDiagnostics = new WeakMap();
 const status = new Map();   // slug -> estado do canal
 
 function send(channel, payload) {
@@ -468,7 +470,7 @@ function watchRedemptions(slug, wc) {
       updateTray();
     }
   });
-  dbg.sendCommand('Network.enable').catch(() => {});
+  return dbg.sendCommand('Network.enable').then(() => true, () => false);
 }
 
 // Fim de cada bônus, somando as horas na ordem das compras.
@@ -606,6 +608,7 @@ async function refreshAll() {
       if (!s.live || (wasLive === false && config.farming)) {
         s.awaitingInitialCredit = !!s.live;
         s.initialCreditRetries = 0;
+        s.lastInitialCreditRetryAt = 0;
         s.nextInitialCreditRetryAt = 0;
       }
       if (wasLive === false && s.live && config.favorites.includes(slug)) {
@@ -934,7 +937,16 @@ async function sendChat(slug, content) {
 // Na janela de cada live: força 160p enquanto ela está oculta.
 function instrumentWatcher(slug, win) {
   const dbg = win.webContents.debugger;
-  try { dbg.attach('1.3'); } catch { return; }
+  const diagnostics = createWatchDiagnostics({ now: () => Date.now() });
+  watcherDiagnostics.set(win, diagnostics);
+  win.webContents.on('did-start-navigation', (_e, _url, isInPlace, isMainFrame) => {
+    if (isMainFrame && !isInPlace) diagnostics.navigation();
+  });
+  try { dbg.attach('1.3'); diagnostics.attached(true); } catch { return; }
+  dbg.on('detach', () => diagnostics.attached(false));
+  dbg.on('message', (_e, method, params) => {
+    if (!win.isDestroyed()) diagnostics.observe(method, params);
+  });
   dbg.on('message', async (_e, method, p) => {
     if (method !== 'Fetch.requestPaused') return;
     const pass = () => dbg.sendCommand('Fetch.continueRequest', { requestId: p.requestId }).catch(() => {});
@@ -951,7 +963,7 @@ function instrumentWatcher(slug, win) {
     } catch { pass(); }
   });
   dbg.sendCommand('Fetch.enable', { patterns: [{ urlPattern: '*.m3u8*', requestStage: 'Response' }] }).catch(() => {});
-  watchRedemptions(slug, win.webContents);
+  Promise.resolve(watchRedemptions(slug, win.webContents)).then(enabled => diagnostics.enabled(enabled));
 }
 
 const userOpened = new WeakSet();
@@ -1056,6 +1068,9 @@ async function checkPlayers() {
       return {
         gate: !!document.querySelector('[data-a-target="content-classification-gate-overlay-start-watching-button"], [data-a-target="player-overlay-mature-accept"]'),
         video: v ? { paused: v.paused, time: Math.round(v.currentTime), height: v.videoHeight, ready: v.readyState } : null,
+        page: { visibility: document.visibilityState, focused: document.hasFocus(),
+          loginPromptVisible: (() => { const b = document.querySelector('[data-a-target="login-button"]'); return !!b && b.getClientRects().length > 0; })(),
+          muted: v ? v.muted : null, volume: v ? v.volume : null },
       };
     })()`), PLAYER_CHECK_MS).catch((err) => {
       // Página lenta (PC fraco, Linux sem aceleração) não é página travada: só fecha depois de
@@ -1070,6 +1085,12 @@ async function checkPlayers() {
     s.playerTimeouts = 0;
     s.ageGate = info.gate;
     s.video = info.video;
+    s.playerSampleAt = Date.now();
+    const page = info.page;
+    const boolean = value => typeof value === 'boolean' ? value : null;
+    s.page = page ? { visibility: ['visible', 'hidden'].includes(page.visibility) ? page.visibility : 'unknown',
+      focused: boolean(page.focused), loginPromptVisible: boolean(page.loginPromptVisible), muted: boolean(page.muted),
+      volume: Number.isFinite(page.volume) && page.volume >= 0 && page.volume <= 1 ? page.volume : null } : null;
   }
 }
 
@@ -1090,12 +1111,21 @@ function logHistory() {
   for (const slug of config.channels) {
     const s = status.get(slug) || {};
     if (!s.live && s.points == null) continue;
+    const win = watchers.get(slug);
     channels[slug] = {
       live: !!s.live, watching: watchers.has(slug), points: s.points ?? null, subscribed: !!s.subscribed,
       earning: earningState(slug, now), video: s.video || null, gate: !!s.ageGate, watchedMin: Math.floor(totalWatched(slug, now) / 60000),
+      diagnostics: { balanceAvailable: s.balanceAvailable === true, apiError: !!s.error, pointsEnabled: s.pointsEnabled !== false,
+        manualPlayer: isShown(slug), playerSampleAt: s.playerSampleAt || null, page: s.page || null,
+        recovery: { awaitingInitialCredit: !!s.awaitingInitialCredit, attempts: s.initialCreditRetries || 0,
+          lastAttemptAt: s.lastInitialCreditRetryAt || null, nextAttemptAt: s.nextInitialCreditRetryAt || null,
+          watchStartedAt: s.watchingSince || null, lastGainAt: s.lastGainAt || null,
+          globalNextAttemptAt: lastInitialCreditRecoveryAt ? lastInitialCreditRecoveryAt + POLL_MS : null },
+        tracking: win ? watcherDiagnostics.get(win)?.snapshot() || null : null },
     };
   }
-  const line = JSON.stringify({ t: new Date(now).toISOString(), loggedIn, maxWatchers: config.maxWatchers, limitTest: limitTestSnapshot(), channels });
+  const line = JSON.stringify({ t: new Date(now).toISOString(), diagnosticsVersion: 1, loggedIn, sessionChecking,
+    farming: config.farming, watchAll: !!config.watchAll, maxWatchers: config.maxWatchers, limitTest: limitTestSnapshot(), channels });
   const file = path.join(app.getPath('userData'), 'points-log.jsonl');
   try {
     if (fs.existsSync(file) && fs.statSync(file).size > 5 * 1024 * 1024) fs.renameSync(file, file + '.old');
@@ -1172,6 +1202,7 @@ function reconcileWatchers() {
       && now - lastInitialCreditRecoveryAt >= POLL_MS;
     if (missingInitialCredit) {
       lastInitialCreditRecoveryAt = now;
+      s.lastInitialCreditRetryAt = now;
       s.initialCreditRetries = (s.initialCreditRetries || 0) + 1;
       s.nextInitialCreditRetryAt = now + Math.min(60 * 60 * 1000, EARN_WINDOW_MS * 2 ** Math.min(s.initialCreditRetries, 3));
     }

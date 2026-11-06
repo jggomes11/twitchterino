@@ -82,6 +82,42 @@ app.whenReady().then(async () => {
     if (process.platform === 'win32') {
       const { BrowserWindow } = require('electron');
       const { chestClickScript } = require('../security/chest');
+      const { createWatchDiagnostics } = require('../security/points-diagnostics');
+      // All HTTPS requests in this empty fixture partition are handled locally.
+      // The synthetic watch event never reaches Twitch or any real account.
+      const metricsSession = session.fromPartition('metrics-fixture-' + process.pid);
+      let intercepted = 0;
+      await metricsSession.protocol.handle('https', request => {
+        const url = new URL(request.url);
+        if (url.origin === 'https://www.twitch.tv' && url.pathname === '/fixture') {
+          return new Response('<html><body>Local metrics fixture</body></html>', { headers: { 'Content-Type': 'text/html' } });
+        }
+        if (url.origin === 'https://spade.twitch.tv' && url.pathname === '/track') {
+          intercepted++;
+          return new Response(null, { status: 204, headers: { 'Access-Control-Allow-Origin': 'https://www.twitch.tv' } });
+        }
+        return new Response(null, { status: 404 });
+      });
+      const metricsPage = new BrowserWindow({ show: false, webPreferences: { session: metricsSession, sandbox: true, contextIsolation: true, nodeIntegration: false } });
+      try {
+        const diagnostics = createWatchDiagnostics();
+        const dbg = metricsPage.webContents.debugger;
+        dbg.attach('1.3'); diagnostics.attached(true);
+        dbg.on('message', (_e, method, params) => diagnostics.observe(method, params));
+        await dbg.sendCommand('Network.enable'); diagnostics.enabled(true);
+        await metricsPage.loadURL('https://www.twitch.tv/fixture');
+        const body = 'data=' + encodeURIComponent(Buffer.from(JSON.stringify([{ event: 'minute-watched', properties: { user_id: 'FAKE_DIAGNOSTIC_USER' } }])).toString('base64'));
+        assert.equal(await metricsPage.webContents.executeJavaScript(`fetch('https://spade.twitch.tv/track', {method:'POST', body:${JSON.stringify(body)}}).then(r => r.status)`), 204);
+        const deadline = Date.now() + 5000;
+        while (diagnostics.snapshot().pendingRequests && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+        const observedMetrics = diagnostics.snapshot();
+        assert.equal(intercepted, 1);
+        assert.equal(observedMetrics.minuteWatchedEvents, 1);
+        assert.equal(observedMetrics.responses, 1);
+        assert.equal(observedMetrics.lastStatus, 204);
+        assert.doesNotMatch(JSON.stringify(observedMetrics), /FAKE_DIAGNOSTIC_USER|postData|https:/);
+        console.log('Native metrics observer: local-only watch-minute request/response classified without persisting request content.');
+      } finally { metricsPage.destroy(); metricsSession.protocol.unhandle('https'); }
       const page = new BrowserWindow({ show: false, webPreferences: { session: ses, sandbox: true, contextIsolation: true, nodeIntegration: false } });
       try {
         const address = origin + '/bonus-fixture';

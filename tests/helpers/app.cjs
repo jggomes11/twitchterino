@@ -13,7 +13,7 @@ function loadApp({ packaged = false, platform = 'win32', configSeed = null } = {
     constructor(...args) { super(...(args.length ? args : [Date.now() + clockOffset])); }
     static now() { return Date.now() + clockOffset; }
   }
-  const state = { scripts: [], requests: [], writes: [], quit: 0, updates: 0, windows: [], ready: [], dialogResponse: 0, sockets: [], timers: [], reloads: [] };
+  const state = { scripts: [], requests: [], writes: [], logs: [], debugCommands: [], quit: 0, updates: 0, windows: [], ready: [], dialogResponse: 0, sockets: [], timers: [], reloads: [] };
   const cookies = new EventEmitter();
   cookies.get = async ({ name }) => [{ value: name === 'auth-token' || name === 'session_token' ? 'FAKE_ACCOUNT_TOKEN' : 'FAKE_OTHER_COOKIE' }];
   const session = {
@@ -36,7 +36,11 @@ function loadApp({ packaged = false, platform = 'win32', configSeed = null } = {
       wc.send = () => {};
       wc.stop = () => {};
       wc.reload = () => { state.reloads.push(wc.id); };
-      wc.debugger = { isAttached: () => false, attach() {}, on() {}, sendCommand: async () => ({}) };
+      let attached = false;
+      wc.debugger = new EventEmitter();
+      wc.debugger.isAttached = () => attached;
+      wc.debugger.attach = () => { attached = true; };
+      wc.debugger.sendCommand = async (method, params) => { state.debugCommands.push({ method, params }); return {}; };
       wc.executeJavaScript = async code => { state.scripts.push(code); return { status: 200, text: '{"data":{"currentUser":{"login":"page"}}}' }; };
       wc.capturePage = async () => ({ toPNG: () => Buffer.from('png') });
       state.windows.push(this);
@@ -77,7 +81,7 @@ function loadApp({ packaged = false, platform = 'win32', configSeed = null } = {
   const ownRequire = createRequire(path.join(root, 'main.js'));
   const context = {
     require: name => name === 'electron' ? electron : name === 'electron-updater' ? { autoUpdater: { on() {}, checkForUpdatesAndNotify: async () => { state.updates++; } } }
-      : name === 'fs' ? { existsSync: () => configSeed !== null, readFileSync: () => JSON.stringify(configSeed || {}), writeFileSync: (...args) => state.writes.push(args), mkdirSync() {}, appendFileSync() {} }
+      : name === 'fs' ? { existsSync: () => configSeed !== null, readFileSync: () => JSON.stringify(configSeed || {}), writeFileSync: (...args) => state.writes.push(args), mkdirSync() {}, statSync: () => ({ size: 0 }), renameSync() {}, appendFileSync: (...args) => state.logs.push(args) }
       : ownRequire(name),
     WebSocket: class {
       constructor() { this.readyState = 0; this.messages = []; state.sockets.push(this); }
