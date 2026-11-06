@@ -168,3 +168,16 @@ test('a rejected telemetry result is not hidden by a later accepted result in on
   assert.equal(d.snapshot().lastSpadeStatusCode, 429);
   assert.equal(d.snapshot().lastSpadeErrorClass, 'rate-limit');
 });
+
+test('an uninspected operation tail cannot make a partially inspected batch look accepted', async () => {
+  let bodyReads = 0;
+  const { d } = fixture({ readResponse: async () => {
+    bodyReads++;
+    return response(Array.from({ length: 11 }, (_, i) => ({ data: { sendSpadeEvents: { statusCode: i === 10 ? 429 : 200 } } })));
+  } });
+  send(d, 'SECRET_REQUEST', Array.from({ length: 11 }, () => operation([event()]))); await finish(d);
+  assert.equal(d.snapshot().spadeAcceptedResponses, 0);
+  assert.equal(d.snapshot().spadeUnavailableResponses, 1);
+  assert.equal(d.snapshot().truncatedEventBatches, 1);
+  assert.equal(bodyReads, 0);
+});

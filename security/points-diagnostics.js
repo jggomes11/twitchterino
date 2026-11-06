@@ -118,11 +118,16 @@ function createWatchDiagnostics({ now = Date.now, channel = null, getExpectedCha
       return { kind: 'legacy', indices: [] };
     }
     if (!body) { counters.graphqlBodyUnavailableRequests++; return null; }
-    let ops;
-    try { const json = JSON.parse(body); ops = (Array.isArray(json) ? json : [json]).slice(0, 10); }
+    let ops, uninspectedTail = false;
+    try {
+      const json = JSON.parse(body), all = Array.isArray(json) ? json : [json];
+      uninspectedTail = all.length > 10;
+      ops = all.slice(0, 10);
+      if (uninspectedTail) counters.graphqlBodyUnavailableRequests++;
+    }
     catch { counters.graphqlBodyUnavailableRequests++; return null; }
     const indices = [];
-    let budget = MAX_EVENTS, classified = false, failed = false, truncated = false;
+    let budget = MAX_EVENTS, classified = false, failed = false, truncated = uninspectedTail;
     ops.forEach((op, index) => {
       if (typeof op?.query !== 'string' || !/\bsendSpadeEvents\s*\(/.test(op.query)) return;
       indices.push(index);
@@ -136,9 +141,9 @@ function createWatchDiagnostics({ now = Date.now, channel = null, getExpectedCha
       } catch { failed = true; }
     });
     if (!indices.length) return null;
-    if (!classified || failed) counters.unclassifiedRequests++;
+    if (!classified || failed || uninspectedTail) counters.unclassifiedRequests++;
     if (truncated) counters.truncatedEventBatches++;
-    return { kind: 'graphql', indices };
+    return { kind: 'graphql', indices, uninspectedTail };
   }
 
   function response(id, status) {
@@ -182,7 +187,7 @@ function createWatchDiagnostics({ now = Date.now, channel = null, getExpectedCha
     else { counters.spadeAcceptedResponses++; counters.lastSpadeErrorClass = 'none'; }
   }
   async function read(id, request, length) {
-    if (reading.size >= MAX_READS || length > MAX_INPUT || typeof readResponse !== 'function') return unavailable();
+    if (request.uninspectedTail || reading.size >= MAX_READS || length > MAX_INPUT || typeof readResponse !== 'function') return unavailable();
     const marker = {}; reading.add(marker);
     const started = epoch;
     try {
@@ -205,7 +210,7 @@ function createWatchDiagnostics({ now = Date.now, channel = null, getExpectedCha
       const identified = classify(request, location);
       if (!identified) return;
       while (pending.size >= MAX_PENDING) pending.delete(pending.keys().next().value);
-      pending.set(id, { responded: false, kind: identified.kind, indices: identified.indices });
+      pending.set(id, { responded: false, kind: identified.kind, indices: identified.indices, uninspectedTail: identified.uninspectedTail === true });
       counters.requests++; counters.lastRequestAt = now();
       if (identified.kind === 'graphql') counters.graphqlRequests++;
     } else if (method === 'Network.responseReceived') response(id, params.response?.status);
