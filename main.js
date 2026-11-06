@@ -597,11 +597,17 @@ async function refreshAll() {
     }
     part.forEach((slug, j) => {
       const s = status.get(slug) || { watchedMs: 0 };
+      s.balanceAvailable = false;
       const u = data && data[`c${j}`];
       if (err) { s.error = err; status.set(slug, s); return; }
       if (!u) { s.error = 'Canal não encontrado na Twitch'; s.live = false; status.set(slug, s); return; }
       const wasLive = s.live;
       s.live = !!u.stream;
+      if (!s.live || (wasLive === false && config.farming)) {
+        s.awaitingInitialCredit = !!s.live;
+        s.initialCreditRetries = 0;
+        s.nextInitialCreditRetryAt = 0;
+      }
       if (wasLive === false && s.live && config.favorites.includes(slug)) {
         notify(`★ ${u.displayName} entrou ao vivo`, u.stream.title || 'Clique para abrir o chat.', () => { showMain(); send('select', slug); });
       }
@@ -629,6 +635,7 @@ async function refreshAll() {
       if (claim && claim !== s.claim) fresh.push(slug);
       s.claim = claim || null;
       const p = cp ? cp.balance : null;
+      s.balanceAvailable = Number.isFinite(p);
       if (verifiedAccountGeneration !== generation) { s.points = null; s.bonusTier = null; s.targetTier = null; }
       updateChannelBalance(slug, s, p);
       status.set(slug, s);
@@ -647,7 +654,12 @@ function updateChannelBalance(slug, s, points) {
   if (typeof points !== 'number' || !Number.isFinite(points)) return;
   if (s.points != null && points > s.points) {
     s.gainedTotal = (s.gainedTotal || 0) + points - s.points;
-    if (watchers.has(slug)) s.lastGainAt = Date.now();
+    if (watchers.has(slug)) {
+      s.lastGainAt = Date.now();
+      s.awaitingInitialCredit = false;
+      s.initialCreditRetries = 0;
+      s.nextInitialCreditRetryAt = 0;
+    }
     addDaily(points - s.points);
   }
   if (s.points != null && points < s.points) registerDrop(slug, s, s.points - points);
@@ -1135,6 +1147,7 @@ const totalWatched = (slug, now) => {
 const turnTime = (slug, now) => now - ((status.get(slug) || {}).watchingSince || now);
 const isShown = (slug) => { const w = watchers.get(slug); return !!w && !w.isDestroyed() && userOpened.has(w); };
 const RECYCLE_MS = 6 * 60 * 60 * 1000;
+let lastInitialCreditRecoveryAt = 0;
 
 function reconcileWatchers() {
   if (config.farming && sessionChecking && !process.env.TWITCHTERINO_ALLOW_ANON) return;
@@ -1151,8 +1164,19 @@ function reconcileWatchers() {
     if (isShown(slug)) continue;
     const idle = !config.watchAll && loggedIn && !limitTest && config.maxWatchers <= 2 && earningState(slug, now) === 'idle';
     const s = status.get(slug);
+    // A page opened just as a stream starts can play without registering its first
+    // credit. Retry that background channel only; leave established earners alone.
+    const missingInitialCredit = config.watchAll && loggedIn && !limitTest
+      && s?.awaitingInitialCredit && s.balanceAvailable && !s.error && !s.ageGate && s.pointsEnabled !== false
+      && turnTime(slug, now) >= EARN_WINDOW_MS && now >= (s.nextInitialCreditRetryAt || 0)
+      && now - lastInitialCreditRecoveryAt >= POLL_MS;
+    if (missingInitialCredit) {
+      lastInitialCreditRecoveryAt = now;
+      s.initialCreditRetries = (s.initialCreditRetries || 0) + 1;
+      s.nextInitialCreditRetryAt = now + Math.min(60 * 60 * 1000, EARN_WINDOW_MS * 2 ** Math.min(s.initialCreditRetries, 3));
+    }
     if (idle && s) s.cooldownUntil = now + IDLE_COOLDOWN_MS;
-    if (idle || turnTime(slug, now) >= RECYCLE_MS) stopWatcher(slug);
+    if (idle || missingInitialCredit || turnTime(slug, now) >= RECYCLE_MS) stopWatcher(slug);
   }
 
   const rotatable = () => [...watchers.keys()].filter((slug) => !isShown(slug)).sort((a, b) => turnTime(b, now) - turnTime(a, now));

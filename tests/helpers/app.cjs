@@ -8,6 +8,11 @@ const { createRequire } = require('node:module');
 
 function loadApp({ packaged = false, platform = 'win32', configSeed = null } = {}) {
   const root = path.resolve(__dirname, '../..');
+  let clockOffset = 0;
+  class ClockDate extends Date {
+    constructor(...args) { super(...(args.length ? args : [Date.now() + clockOffset])); }
+    static now() { return Date.now() + clockOffset; }
+  }
   const state = { scripts: [], requests: [], writes: [], quit: 0, updates: 0, windows: [], ready: [], dialogResponse: 0, sockets: [], timers: [], reloads: [] };
   const cookies = new EventEmitter();
   cookies.get = async ({ name }) => [{ value: name === 'auth-token' || name === 'session_token' ? 'FAKE_ACCOUNT_TOKEN' : 'FAKE_OTHER_COOKIE' }];
@@ -79,7 +84,7 @@ function loadApp({ packaged = false, platform = 'win32', configSeed = null } = {
       send(message) { this.messages.push(message); }
       close() { this.readyState = 3; if (this.onclose) this.onclose(); }
     },
-    __dirname: root, module: { exports: {} }, Buffer, URL, console, AbortController, TextDecoder,
+    __dirname: root, module: { exports: {} }, Buffer, URL, console, AbortController, TextDecoder, Date: ClockDate,
     process: { platform, env: {}, argv: [] },
     setTimeout: (callback, delay) => { const timer = { callback, delay, cancelled: false }; state.timers.push(timer); return timer; },
     clearTimeout(timer) { if (timer) timer.cancelled = true; }, setInterval: () => 1, clearInterval() {}, setImmediate, queueMicrotask,
@@ -95,6 +100,7 @@ function loadApp({ packaged = false, platform = 'win32', configSeed = null } = {
   return {
     state, app, session, handlers, main, api, apiExports: context.module.exports,
     event: () => ({ sender: main.webContents, senderFrame: main.webContents.mainFrame }),
+    advanceTime(ms) { clockOffset += ms; },
     async fireTimers(delay) {
       const timers = state.timers.filter(timer => timer.delay === delay);
       state.timers = state.timers.filter(timer => timer.delay !== delay);
