@@ -2,17 +2,31 @@
 param(
     [ValidatePattern('^[0-9a-f]{12}$')][string]$ProfileCommit,
     [ValidatePattern('^[a-zA-Z0-9_]{2,25}$')][string[]]$Channels = @(),
-    [ValidateRange(1,120)][int]$Samples = 20
+    [ValidateRange(1,120)][int]$Samples = 20,
+    [switch]$IncludeWatching
 )
 $ErrorActionPreference = 'Stop'
 $BooleanFields = @('live','watching','gate','paused','balanceAvailable','apiError','pointsEnabled','manualPlayer',
     'focused','loginPromptVisible','muted','awaitingInitialCredit','debuggerAttached','networkEnabled',
-    'loggedIn','sessionChecking','farming','watchAll')
+    'loggedIn','sessionChecking','farming','watchAll','lastWatchLoggedIn','lastWatchAccountMatches','lastWatchChannelMatches',
+    'lastWatchLive','lastWatchAdPlaying','lastWatchPlaybackGated','lastWatchMuted')
 $NumberFields = @('points','watchedMin','time','height','ready','playerSampleAt','volume','attempts','lastAttemptAt',
     'nextAttemptAt','watchStartedAt','lastGainAt','globalNextAttemptAt','requests','minuteWatchedEvents',
     'unclassifiedRequests','responses','httpErrors','networkFailures','lastStatus','lastRequestAt',
-    'lastMinuteWatchedAt','lastResponseAt','navigations','lastNavigationAt','pendingRequests','diagnosticsVersion','maxWatchers')
-$Enums = @{earning=@('earning','warming','idle');visibility=@('visible','hidden','unknown')}
+    'lastMinuteWatchedAt','lastResponseAt','navigations','lastNavigationAt','pendingRequests','diagnosticsVersion','maxWatchers',
+    'graphqlRequests','graphqlResponses','graphqlBodyUnavailableRequests','graphqlErrorResponses','spadeAcceptedResponses',
+    'spadeRejectedResponses','spadeUnavailableResponses','lastGraphqlHttpStatus','lastSpadeStatusCode','lastSpadeResponseAt',
+    'watchLoggedInEvents','watchLoggedOutEvents','watchLoginUnknownEvents','truncatedEventBatches','lastWatchMinutesLogged',
+    'discardedResponseReads','pendingResponseReads')
+$Enums = @{earning=@('earning','warming','idle');visibility=@('visible','hidden','unknown');
+    lastSpadeErrorClass=@('none','integrity','authentication','permission','rate-limit','other','unavailable')}
+$TrackingFields = @('debuggerAttached','networkEnabled','requests','minuteWatchedEvents','unclassifiedRequests','responses',
+    'httpErrors','networkFailures','lastStatus','lastRequestAt','lastMinuteWatchedAt','lastResponseAt','navigations','lastNavigationAt',
+    'pendingRequests','graphqlRequests','graphqlResponses','graphqlBodyUnavailableRequests','graphqlErrorResponses',
+    'spadeAcceptedResponses','spadeRejectedResponses','spadeUnavailableResponses','lastGraphqlHttpStatus','lastSpadeStatusCode',
+    'lastSpadeErrorClass','lastSpadeResponseAt','watchLoggedInEvents','watchLoggedOutEvents','watchLoginUnknownEvents',
+    'truncatedEventBatches','lastWatchLoggedIn','lastWatchAccountMatches','lastWatchChannelMatches','lastWatchLive',
+    'lastWatchAdPlaying','lastWatchPlaybackGated','lastWatchMuted','lastWatchMinutesLogged','discardedResponseReads','pendingResponseReads')
 function Select-Scalar([string]$Name, $Value) {
     if ($null -eq $Value) { return $null }
     if ($Name -in $BooleanFields) { if ($Value -is [bool]) { return $Value }; return $null }
@@ -33,7 +47,7 @@ function Select-Scalar([string]$Name, $Value) {
         if ([double]::IsNaN($Number) -or [double]::IsInfinity($Number) -or $Number -lt 0 -or $Number -gt 9007199254740991) { return $null }
         if ($Name -eq 'volume') { if ($Number -le 1) { return $Value }; return $null }
         if ([Math]::Truncate($Number) -ne $Number) { return $null }
-        if ($Name -eq 'lastStatus' -and ($Number -lt 100 -or $Number -gt 599)) { return $null }
+        if ($Name -in @('lastStatus','lastGraphqlHttpStatus','lastSpadeStatusCode') -and ($Number -lt 100 -or $Number -gt 599)) { return $null }
         if ($Name -eq 'ready' -and $Number -gt 4) { return $null }
         if ($Name -eq 'height' -and $Number -gt 65535) { return $null }
         return $Value
@@ -79,16 +93,17 @@ try {
         $SelectedChannels = [ordered]@{}
         foreach ($Property in $Record.channels.PSObject.Properties) {
             $Name = $Property.Name.ToLowerInvariant()
-            if ($Wanted.Count -and $Name -notin $Wanted) { continue }
-            if (-not $Aliases.ContainsKey($Name)) { $Aliases[$Name] = 'C' + ($Aliases.Count + 1) }
             $Channel = $Property.Value
+            $Watching = ($Channel.watching -is [bool]) -and ($Channel.watching -eq $true)
+            if ($Wanted.Count -and $Name -notin $Wanted -and -not ($IncludeWatching -and $Watching)) { continue }
+            if (-not $Aliases.ContainsKey($Name)) { $Aliases[$Name] = 'C' + ($Aliases.Count + 1) }
             $Entry = Select-Fields $Channel @('live','watching','points','earning','gate','watchedMin')
             $Entry | Add-Member -NotePropertyName video -NotePropertyValue (Select-Fields $Channel.video @('paused','time','height','ready'))
             $Diagnostic = Select-Fields $Channel.diagnostics @('balanceAvailable','apiError','pointsEnabled','manualPlayer','playerSampleAt')
             if ($Diagnostic) {
                 $Diagnostic | Add-Member -NotePropertyName page -NotePropertyValue (Select-Fields $Channel.diagnostics.page @('visibility','focused','loginPromptVisible','muted','volume'))
                 $Diagnostic | Add-Member -NotePropertyName recovery -NotePropertyValue (Select-Fields $Channel.diagnostics.recovery @('awaitingInitialCredit','attempts','lastAttemptAt','nextAttemptAt','watchStartedAt','lastGainAt','globalNextAttemptAt'))
-                $Diagnostic | Add-Member -NotePropertyName tracking -NotePropertyValue (Select-Fields $Channel.diagnostics.tracking @('debuggerAttached','networkEnabled','requests','minuteWatchedEvents','unclassifiedRequests','responses','httpErrors','networkFailures','lastStatus','lastRequestAt','lastMinuteWatchedAt','lastResponseAt','navigations','lastNavigationAt','pendingRequests'))
+                $Diagnostic | Add-Member -NotePropertyName tracking -NotePropertyValue (Select-Fields $Channel.diagnostics.tracking $TrackingFields)
             }
             $Entry | Add-Member -NotePropertyName diagnostics -NotePropertyValue $Diagnostic
             $SelectedChannels[$Aliases[$Name]] = $Entry

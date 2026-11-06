@@ -108,6 +108,13 @@ app.whenReady().then(async () => {
           intercepted++;
           return new Response(null, { status: 204, headers: { 'Access-Control-Allow-Origin': 'https://www.twitch.tv' } });
         }
+        if (url.origin === 'https://gql.twitch.tv' && url.pathname === '/gql') {
+          if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: {
+            'Access-Control-Allow-Origin': 'https://www.twitch.tv', 'Access-Control-Allow-Methods': 'POST', 'Access-Control-Allow-Headers': 'content-type' } });
+          intercepted++;
+          return new Response('{"data":{"sendSpadeEvents":{"statusCode":200}},"private":"FAKE_RESPONSE_SECRET"}', {
+            headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': 'https://www.twitch.tv' } });
+        }
         return new Response(null, { status: 404 });
       });
       const metricsPage = new BrowserWindow({ show: false, webPreferences: { session: metricsSession, sandbox: true, contextIsolation: true, nodeIntegration: false } });
@@ -115,11 +122,13 @@ app.whenReady().then(async () => {
         // Initialize the first renderer before awaiting CDP commands; awaiting
         // Network.enable on an unused about:blank window can otherwise stall.
         await metricsStep('load local protocol document', () => metricsPage.loadURL('https://www.twitch.tv/fixture'));
-        const diagnostics = createWatchDiagnostics();
         const dbg = metricsPage.webContents.debugger;
+        const diagnostics = createWatchDiagnostics({ channel: 'fixture', getExpectedAccountId: () => '777', getExpectedChannelId: () => '123',
+          readResponse: id => dbg.sendCommand('Network.getResponseBody', { requestId: id }) });
         dbg.attach('1.3'); diagnostics.attached(true);
         dbg.on('message', (_e, method, params) => diagnostics.observe(method, params));
-        await metricsStep('enable network observer', () => dbg.sendCommand('Network.enable')); diagnostics.enabled(true);
+        await metricsStep('enable network observer', () => dbg.sendCommand('Network.enable', {
+          maxPostDataSize: 64 * 1024, maxResourceBufferSize: 2 * 1024 * 1024, maxTotalBufferSize: 8 * 1024 * 1024 })); diagnostics.enabled(true);
         const body = 'data=' + encodeURIComponent(Buffer.from(JSON.stringify([{ event: 'minute-watched', properties: { user_id: 'FAKE_DIAGNOSTIC_USER' } }])).toString('base64'));
         assert.equal(await metricsStep('observe local-only watch request', () => metricsPage.webContents.executeJavaScript(`fetch('https://spade.twitch.tv/track', {method:'POST', body:${JSON.stringify(body)}}).then(r => r.status)`)), 204);
         const deadline = Date.now() + 5000;
@@ -130,6 +139,24 @@ app.whenReady().then(async () => {
         assert.equal(observedMetrics.responses, 1);
         assert.equal(observedMetrics.lastStatus, 204);
         assert.doesNotMatch(JSON.stringify(observedMetrics), /FAKE_DIAGNOSTIC_USER|postData|https:/);
+        const { gzipSync } = require('node:zlib');
+        const input = { encoding: 'GZIP_B64', repository: 'twilight', data: gzipSync(JSON.stringify([
+          { event: 'minute-watched', properties: { logged_in: true, user_id: 777, channel_id: '123',
+            channel: 'fixture', is_live: true, is_ad_playing: false, playback_gated: false } },
+        ])).toString('base64') };
+        const gqlBody = JSON.stringify({ query: 'mutation SendEvents($input:SendSpadeEventsInput!){sendSpadeEvents(input:$input){statusCode}}', variables: { input } });
+        assert.equal(await metricsStep('observe compressed GraphQL watch request', () => metricsPage.webContents.executeJavaScript(
+          `fetch('https://gql.twitch.tv/gql', {method:'POST', headers:{'Content-Type':'application/json'}, body:${JSON.stringify(gqlBody)}}).then(r => r.json()).then(j => j.data.sendSpadeEvents.statusCode)`)), 200);
+        const gqlDeadline = Date.now() + 5000;
+        while (diagnostics.snapshot().spadeAcceptedResponses + diagnostics.snapshot().spadeRejectedResponses + diagnostics.snapshot().spadeUnavailableResponses < 1 && Date.now() < gqlDeadline) await new Promise(resolve => setTimeout(resolve, 10));
+        const gqlMetrics = diagnostics.snapshot();
+        assert.equal(gqlMetrics.graphqlRequests, 1);
+        assert.equal(gqlMetrics.lastWatchAccountMatches, true);
+        assert.equal(gqlMetrics.lastWatchChannelMatches, true);
+        assert.equal(gqlMetrics.spadeAcceptedResponses, 1);
+        assert.equal(gqlMetrics.lastSpadeStatusCode, 200);
+        assert.equal(intercepted, 2);
+        assert.doesNotMatch(JSON.stringify(gqlMetrics), /FAKE_RESPONSE_SECRET|user_id|channel_id|https:|fixture/);
         console.log('Native metrics observer: local-only watch-minute request/response classified without persisting request content.');
       } finally { metricsPage.destroy(); metricsSession.protocol.unhandle('https'); }
     }

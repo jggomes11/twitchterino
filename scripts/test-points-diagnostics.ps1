@@ -17,13 +17,14 @@ try {
         diagnostics=@{balanceAvailable=$true;apiError=$false;pointsEnabled=$true;manualPlayer=$false;playerSampleAt=1000;
             page=@{visibility='visible';focused=$false;loginPromptVisible=$false;muted=$true;volume=1;token='SECRET_PAGE'};
             recovery=@{awaitingInitialCredit=$false;attempts=0;lastAttemptAt=$null;token='SECRET_RECOVERY'};
-            tracking=@{debuggerAttached=$true;networkEnabled=$true;requests=3;minuteWatchedEvents=2;lastStatus=204;headers='SECRET_AUTH'}}}
+            tracking=@{debuggerAttached=$true;networkEnabled=$true;requests=3;minuteWatchedEvents=2;lastStatus=204;headers='SECRET_AUTH';
+                graphqlRequests=2;spadeAcceptedResponses=2;lastSpadeStatusCode=200;lastSpadeErrorClass='none';lastWatchLoggedIn=$true;lastWatchAccountMatches=$true;lastWatchChannelMatches=$true}}}
     $Control = @{live=$true;watching=$true;points=4610;earning='earning';diagnostics=@{tracking=@{minuteWatchedEvents=4}}}
     $Log = Join-Path $Profile 'points-log.jsonl'
     foreach ($Minute in 0,1) {
         $Control.points = 4610 + $Minute * 10
         @{t=('2026-11-06T03:0' + $Minute + ':00Z');diagnosticsVersion=1;loggedIn=$true;sessionChecking=$false;farming=$true;watchAll=$true;
-            username='SECRET_LOGIN';token='SECRET_TOKEN';channels=@{rodil=$Target;faturetosl=$Control;unselected=@{points=999}}} |
+            username='SECRET_LOGIN';token='SECRET_TOKEN';channels=@{rodil=$Target;faturetosl=$Control;unselected=@{points=999;watching='SECRET_BOOLEAN'}}} |
             ConvertTo-Json -Depth 10 -Compress | Add-Content -LiteralPath $Log -Encoding UTF8
     }
     Add-Content -LiteralPath $Log -Value '{"partial":' -Encoding UTF8
@@ -37,7 +38,12 @@ try {
     if ($Report.samples[0].channels.C1.points -ne 300 -or $Report.samples[1].channels.C2.points -ne 4620) { throw 'Paired channel order or balances mismatch' }
     if (@($Report.samples[0].channels.PSObject.Properties).Count -ne 2) { throw 'Unselected channel exported' }
     if ($Report.samples[0].channels.C1.diagnostics.tracking.minuteWatchedEvents -ne 2) { throw 'Watch-event evidence missing' }
+    if ($Report.samples[0].channels.C1.diagnostics.tracking.graphqlRequests -ne 2 -or $Report.samples[0].channels.C1.diagnostics.tracking.lastWatchAccountMatches -ne $true) { throw 'Current GraphQL watch metadata missing' }
     if ($Report.samples[0].channels.C1.diagnostics.recovery.awaitingInitialCredit -ne $false) { throw 'Recovery evidence missing' }
+    $ActiveText = (& $Exporter -ProfileCommit $ProfileId -Channels rodil -IncludeWatching -Samples 10 | Out-String).Trim()
+    if ($ActiveText -match 'SECRET|rodil|faturetosl|unselected') { throw 'Active-channel report disclosed private fields' }
+    $Active = $ActiveText | ConvertFrom-Json
+    if (@($Active.samples[0].channels.PSObject.Properties).Count -ne 2 -or $Active.samples[0].channels.C1.points -ne 300) { throw 'Active-channel collection must preserve the selected target alias and include the control' }
     $Missing = (& $Exporter -ProfileCommit '000000000000' | Out-String) | ConvertFrom-Json
     if ($Missing.error -ne 'profile-log-not-found') { throw 'Missing profile was not reported safely' }
     $Newest = (& $Exporter -Samples 10 | Out-String) | ConvertFrom-Json

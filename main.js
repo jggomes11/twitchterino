@@ -470,7 +470,8 @@ function watchRedemptions(slug, wc) {
       updateTray();
     }
   });
-  return dbg.sendCommand('Network.enable').then(() => true, () => false);
+  return dbg.sendCommand('Network.enable', { maxPostDataSize: 64 * 1024,
+    maxResourceBufferSize: 2 * 1024 * 1024, maxTotalBufferSize: 8 * 1024 * 1024 }).then(() => true, () => false);
 }
 
 // Fim de cada bônus, somando as horas na ordem das compras.
@@ -615,6 +616,7 @@ async function refreshAll() {
         notify(`★ ${u.displayName} entrou ao vivo`, u.stream.title || 'Clique para abrir o chat.', () => { showMain(); send('select', slug); });
       }
       s.displayName = u.displayName || slug;
+      s.channelId = typeof u.id === 'string' && /^[1-9][0-9]{0,19}$/.test(u.id) ? u.id : null;
       s.avatar = u.profileImageURL || null;
       s.viewers = u.stream ? u.stream.viewersCount : 0;
       s.title = u.stream ? u.stream.title : '';
@@ -937,7 +939,11 @@ async function sendChat(slug, content) {
 // Na janela de cada live: força 160p enquanto ela está oculta.
 function instrumentWatcher(slug, win) {
   const dbg = win.webContents.debugger;
-  const diagnostics = createWatchDiagnostics({ now: () => Date.now() });
+  const diagnostics = createWatchDiagnostics({ now: () => Date.now(), channel: slug,
+    getExpectedChannelId: () => status.get(slug)?.channelId || null,
+    getExpectedAccountId: () => loggedIn && verifiedAccountGeneration === apiClient.generation
+      ? /^id:([1-9][0-9]{0,19})$/.exec(config.reportAccount || '')?.[1] || null : null,
+    readResponse: id => withTimeout(dbg.sendCommand('Network.getResponseBody', { requestId: id }), 3000) });
   watcherDiagnostics.set(win, diagnostics);
   win.webContents.on('did-start-navigation', details => {
     if (details.isMainFrame && !details.isSameDocument) diagnostics.navigation();
@@ -1124,7 +1130,7 @@ function logHistory() {
         tracking: win ? watcherDiagnostics.get(win)?.snapshot() || null : null },
     };
   }
-  const line = JSON.stringify({ t: new Date(now).toISOString(), diagnosticsVersion: 1, loggedIn, sessionChecking,
+  const line = JSON.stringify({ t: new Date(now).toISOString(), diagnosticsVersion: 2, loggedIn, sessionChecking,
     farming: config.farming, watchAll: !!config.watchAll, maxWatchers: config.maxWatchers, limitTest: limitTestSnapshot(), channels });
   const file = path.join(app.getPath('userData'), 'points-log.jsonl');
   try {

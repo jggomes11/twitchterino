@@ -44,3 +44,14 @@
 - [x] Write and run fixture tests for paired selection/anonymization, skipped malformed final line and safe missing-profile output; observe RED before implementation. Local PowerShell7.6.9 RED/GREEN verified; Windows5.1/7 execution in CI.
 - [x] Implement exporter, package it and add native workflow verification. Document evidence limits and exact profile-reuse commands.
 - [ ] Run all checks, request one fresh whole-change review, address important findings with RED/GREEN tests, push existing branch and verify Windows artifact/source hashes. Keep PR draft and provide diagnostic test instructions.
+
+### Task3: Observe the verified current GraphQL telemetry transport
+
+**Files:** modify `security/points-diagnostics.js`, `main.js`, Node observer/integration tests, native Electron fixture, PowerShell exporter/privacy fixture and Windows validation docs.
+
+**Interfaces:** extend `createWatchDiagnostics({ now, channel, getExpectedChannelId, getExpectedAccountId, readResponse })`. `observe` may return a caught promise for an identified telemetry response; all output remains bounded numeric/boolean/enum metadata. Existing controller supplies a3sec-limited debugger response reader. History schema becomes diagnosticsVersion2; exporter schema stays1.
+
+- [x] Add RED regressions for real SendEvents/GZIP_B64 requests, unrelated GraphQL exclusion, decompression/batch limits, ephemeral account/channel comparison, accepted/rejected/error responses, unavailable bodies and obsolete-navigation reads.
+- [x] Implement bounded current-transport parsing and passive response observation, wire verified account/public-channel comparisons and history version2, then run focused and full Node tests. Local97/97 passed.
+- [x] Extend native local-only Electron fixture and typed PowerShell export tests for new fields/format, observe the new integration/export assertions fail before wiring and pass afterward. IncludeWatching is additive and includes only actual boolean watching states. Native Linux and PS7 passed.
+- [ ] Obtain one fresh review of this transport correction, fix important findings via RED/GREEN, run native Windows and verify the pinned artifact/source before delivering a new diagnostic build. Payout cause stays open until real evidence distinguishes rejection, bad metadata and platform eligibility.

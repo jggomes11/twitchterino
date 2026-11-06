@@ -20,7 +20,7 @@ function fixture({ late = false } = {}) {
     const data = { currentUser: { id: '1', login: 'fixture', displayName: 'Fixture' } };
     for (const m of JSON.parse(options.body).query.matchAll(/(c[0-9]+): user\(login: ("[^"\n]+")\)/g)) {
       const slug = JSON.parse(m[2]);
-      data[m[1]] = { id: 'channel-' + slug, displayName: slug,
+      data[m[1]] = { id: slug === target ? '123' : '99', displayName: slug,
         stream: slug === control || targetLive ? { id: 'stream-' + slug, title: 'Fixture', viewersCount: 1 } : null,
         channel: { communityPointsSettings: { isEnabled: true, customRewards: [] }, self: {
           communityPoints: partial && slug === target ? null : { balance: slug === target ? 300 : balance, availableClaim: null } } } };
@@ -98,4 +98,40 @@ test('Electron45 navigation details discard obsolete requests only for a new mai
   assert.equal(tracking.pendingRequests, 0);
   assert.equal(tracking.navigations, 1);
   assert.doesNotMatch(JSON.stringify(tracking), /SECRET/);
+});
+
+test('real main compares the transmitted watch account/channel and reads only identified telemetry responses', async () => {
+  const { gzipSync } = require('node:zlib');
+  const f = fixture(); await f.poll();
+  const wc = f.player(f.target).webContents;
+  const original = wc.debugger.sendCommand;
+  let bodyReads = 0;
+  wc.debugger.sendCommand = async (method, params) => {
+    if (method === 'Network.getResponseBody') {
+      bodyReads++;
+      assert.equal(params.requestId, 'telemetry');
+      return { body: '{"data":{"sendSpadeEvents":{"statusCode":200}},"private":"SECRET_RESPONSE"}' };
+    }
+    return original(method, params);
+  };
+  const data = gzipSync(JSON.stringify([{ event: 'minute-watched', properties: {
+    user_id: 1, channel_id: '123', logged_in: true, live: true, is_ad_playing: false,
+    playback_gated: false, muted: false, minutes_logged: 2, token: 'SECRET_BODY',
+  } }])).toString('base64');
+  wc.debugger.emit('message', {}, 'Network.requestWillBeSent', { requestId: 'telemetry', request: {
+    method: 'POST', url: 'https://gql.twitch.tv/gql', postData: JSON.stringify({
+      query: 'mutation SendEvents($input:SendSpadeEventsInput!){sendSpadeEvents(input:$input){statusCode}}',
+      variables: { input: { data, repository: 'twilight', encoding: 'GZIP_B64' } },
+    }) } });
+  wc.debugger.emit('message', {}, 'Network.responseReceived', { requestId: 'telemetry', response: { status: 200 } });
+  wc.debugger.emit('message', {}, 'Network.loadingFinished', { requestId: 'telemetry', encodedDataLength: 100 });
+  await new Promise(resolve => setImmediate(resolve));
+  await f.poll();
+  const log = f.log(), d = log.channels[f.target].diagnostics;
+  assert.equal(d.tracking.lastWatchAccountMatches, true);
+  assert.equal(d.tracking.lastWatchChannelMatches, true);
+  assert.equal(d.tracking.spadeAcceptedResponses, 1);
+  assert.equal(bodyReads, 1);
+  assert.equal(log.diagnosticsVersion, 2);
+  assert.doesNotMatch(JSON.stringify(log), /SECRET|user_id|channel_id|sendSpadeEvents/);
 });
