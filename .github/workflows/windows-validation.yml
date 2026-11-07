@@ -9,6 +9,10 @@ on:
         description: Build Windows installer and portable release candidates
         type: boolean
         default: false
+      publish_release:
+        description: Publish verified release assets (main branch only, requires release)
+        type: boolean
+        default: false
       upload_preview:
         description: Upload the verified four-profile preview to its existing draft
         type: boolean
@@ -62,7 +66,7 @@ jobs:
         run: node scripts/validate-desktop.cjs
       - name: Validate four isolated profiles before release packaging
         if: success() && env.BUILD_RELEASE != 'true'
-        timeout-minutes: 3
+        timeout-minutes: 5
         run: node scripts/validate-profiles.cjs dist/win-unpacked/Twitchterino.exe validation-output/evidence/profile-validation.json
       - name: Prepare isolated manual validation bundle
         if: always() && steps.package.outcome == 'success'
@@ -83,7 +87,7 @@ jobs:
         run: node scripts/package-windows-release.cjs
       - name: Validate four simultaneous isolated portable profiles
         if: success() && env.BUILD_RELEASE == 'true'
-        timeout-minutes: 3
+        timeout-minutes: 5
         run: node scripts/validate-profiles.cjs
       - name: Archive portable profiles and calculate release checksums
         if: success() && env.BUILD_RELEASE == 'true'
@@ -116,6 +120,52 @@ jobs:
           retention-days: 3
           include-hidden-files: true
           if-no-files-found: warn
+
+  publish-release:
+    needs: windows
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.release && inputs.publish_release && !inputs.upload_preview
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Download candidates from this successful Windows run
+        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "windows-release-$GITHUB_SHA" --dir release-output
+      - name: Verify source identity and asset checksums
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re
+          root = pathlib.Path('release-output')
+          package = json.loads(pathlib.Path('package.json').read_text())
+          info = json.loads((root / 'release-build-info.json').read_text())
+          version = package['version']
+          assert re.fullmatch(r'\d+\.\d+\.\d+', version), 'Expected stable release version'
+          assert info['sourceSha'] == os.environ['GITHUB_SHA'], 'Unexpected candidate source'
+          assert info['version'] == version and info['profiles'] == 4 and info['portableFormat'] == 'directory-zip'
+          expected = {'Twitchterino-Setup.exe', f'Twitchterino-{version}-Windows-x64-4-contas.zip'}
+          seen = set()
+          for line in (root / 'SHA256SUMS.txt').read_text().splitlines():
+              digest, name = line.split('  ', 1)
+              assert name in expected and name not in seen, 'Unexpected or duplicate release asset'
+              assert hashlib.file_digest((root / name).open('rb'), 'sha256').hexdigest() == digest, 'Asset checksum mismatch'
+              seen.add(name)
+          assert seen == expected, 'Missing release asset'
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write(f'RELEASE_VERSION={version}\nRELEASE_TAG=v{version}\n')
+          print('Verified installer, four-account ZIP and source identity.')
+          PY
+      - name: Create draft, upload verified assets and publish
+        run: |
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Twitchterino $RELEASE_VERSION — quatro contas" --notes-file docs/releases/v0.1.3.pt-BR.md --draft
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" release-output/Twitchterino-Setup.exe "release-output/Twitchterino-$RELEASE_VERSION-Windows-x64-4-contas.zip" release-output/SHA256SUMS.txt release-output/release-build-info.json
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
 
   upload-preview:
     if: github.event_name == 'workflow_dispatch' && inputs.upload_preview

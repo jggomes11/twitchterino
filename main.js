@@ -81,7 +81,7 @@ const DEFAULT_CONFIG = {
   ],
   farming: true,
   watchAll: false,
-  // A Twitch conta no máximo 2 lives por IP como espectador: mais que isso é testado à parte.
+  // Coleta com duas lives; a rotação distribui as vagas entre os canais.
   maxWatchers: 2,
   lowQuality: true,
   rotation: true,

@@ -4,25 +4,104 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const net = require('node:net');
 const { spawn, spawnSync } = require('node:child_process');
 const { isRunning, stop } = require('./profile-process.cjs');
 const pkg = require('../package.json');
 
 assert.equal(process.platform, 'win32', 'Validate portable profile processes on native Windows');
-// Keep the CI controller scheduled while four foreground Chromium clients start.
-// Child applications retain their normal priority and unchanged product flags.
-os.setPriority(process.pid, os.constants.priority.PRIORITY_HIGH);
 const root = path.resolve(__dirname, '..');
 const executable = path.resolve(process.argv[2] || path.join(root, 'release-output', 'portable', 'app', 'Twitchterino.exe'));
 const reportPath = path.resolve(process.argv[3] || path.join(root, 'release-output', 'profile-validation.json'));
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'twitchterino-profile-validation-'));
 const children = [];
+const profiles = [];
 const report = { version: pkg.version, scope: 'four empty portable profiles; no account or point awards', graphics: 'software rendering in the multi-process CI fixture', passed: false };
-report.controllerPriority = os.getPriority(process.pid);
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
-function launch(profile) {
+async function freePort() {
+  const server = net.createServer();
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  const port = server.address().port;
+  await new Promise(resolve => server.close(resolve));
+  return port;
+}
+async function connect(url) {
+  const socket = new WebSocket(url), pending = new Map();
+  let next = 0;
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { socket.close(); reject(new Error('Profile debug connection timed out')); }, 5000);
+    socket.addEventListener('open', () => { clearTimeout(timer); resolve(); }, { once: true });
+    socket.addEventListener('error', () => { clearTimeout(timer); reject(new Error('Profile debug connection failed')); }, { once: true });
+  });
+  socket.addEventListener('message', event => {
+    const message = JSON.parse(String(event.data)), operation = pending.get(message.id);
+    if (!operation) return;
+    pending.delete(message.id); clearTimeout(operation.timer);
+    if (message.error) operation.reject(new Error('Profile debug command failed'));
+    else operation.resolve(message.result);
+  });
+  socket.addEventListener('close', () => {
+    for (const operation of pending.values()) { clearTimeout(operation.timer); operation.reject(new Error('Profile debug connection closed')); }
+    pending.clear();
+  });
+  return {
+    call(method, params = {}) {
+      return new Promise((resolve, reject) => {
+        const id = ++next;
+        const timer = setTimeout(() => { pending.delete(id); reject(new Error('Profile debug command timed out')); }, 5000);
+        pending.set(id, { resolve, reject, timer }); socket.send(JSON.stringify({ id, method, params }));
+      });
+    },
+    close() { socket.close(); },
+  };
+}
+async function evaluate(client, expression) {
+  const result = await client.call('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+  assert(!result.exceptionDetails, 'Profile UI operation failed');
+  return result.result.value;
+}
+async function openClient(profile) {
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    assert(isRunning(profile.child), 'Profile exited before its UI was ready');
+    try {
+      const targets = await fetch('http://127.0.0.1:' + profile.child.port + '/json/list', { signal: AbortSignal.timeout(1000) }).then(r => r.json());
+      const ui = targets.find(t => t.type === 'page' && /\/renderer\/index\.html$/.test(t.url));
+      const api = targets.find(t => t.type === 'page' && t.url.startsWith('https://www.twitch.tv/'));
+      if (ui && api) {
+        profile.ui = await connect(ui.webSocketDebuggerUrl);
+        profile.api = await connect(api.webSocketDebuggerUrl);
+        const state = await evaluate(profile.ui, 'window.tt && window.tt.getState()');
+        if (state?.channels?.length && state.channels.every(channel => typeof channel.live === 'boolean')) {
+          assert.equal(state.loggedIn, false, 'A CI profile must have no real account');
+          assert.equal(state.watchAll, false); assert.equal(state.maxWatchers, 2); assert.equal(state.rotation, true);
+          return;
+        }
+      }
+    } catch (error) { profile.clientError = error.message; }
+    profile.ui?.close(); profile.api?.close();
+    await pause(250);
+  }
+  throw new Error('Profile UI/session unavailable: ' + (profile.clientError || 'no target'));
+}
+const markerUrl = 'https://profile-isolation.invalid/';
+async function marker(profile) {
+  const result = await profile.api.call('Network.getCookies', { urls: [markerUrl] });
+  return result.cookies.filter(c => c.name === 'profile-isolation-marker').map(c => c.value);
+}
+async function quitProfile(profile) {
+  if (profile.ui && isRunning(profile.child)) {
+    try { await evaluate(profile.ui, 'window.tt.quit()'); } catch {}
+    const deadline = Date.now() + 10000;
+    while (isRunning(profile.child) && Date.now() < deadline) await pause(100);
+  }
+  profile.ui?.close(); profile.api?.close();
+  await stop(profile.child);
+}
+function launch(profile, port) {
   console.log('Profile fixture: launch requested at ' + new Date().toISOString() + ', free MiB ' + Math.round(os.freemem() / 1048576));
-  const child = spawn(executable, ['--disable-gpu'], { env: { ...process.env, TWITCHTERINO_DATA: profile, TWITCHTERINO_DEBUG: '1', ELECTRON_NO_ATTACH_CONSOLE: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(executable, ['--disable-gpu', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=' + port], { env: { ...process.env, TWITCHTERINO_DATA: profile, TWITCHTERINO_DEBUG: '1', ELECTRON_NO_ATTACH_CONSOLE: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  child.port = port;
   child.output = '';
   for (const stream of [child.stdout, child.stderr]) stream.on('data', data => { child.output = (child.output + data).slice(0, 6000); });
   child.on('error', error => { child.launchError = error.message; });
@@ -34,12 +113,12 @@ function launch(profile) {
 (async () => {
   try {
     assert(fs.existsSync(executable), 'Missing actual portable executable');
-    const profiles = [];
     for (let index = 1; index <= 4; index++) {
       const profile = path.join(temporary, 'Conta-' + index);
       assert(!fs.existsSync(profile), 'First launch must create its own profile directory');
-      const child = launch(profile);
-      profiles.push({ path: profile, child });
+      const child = launch(profile, await freePort());
+      const client = { path: profile, child };
+      profiles.push(client);
       const startupDeadline = Date.now() + 30000;
       while (!child.output.includes('profile initialization complete')) {
         assert(!child.launchError && isRunning(child), 'A profile exited during initialization');
@@ -47,6 +126,22 @@ function launch(profile) {
         await pause(250);
       }
       console.log('Profile fixture: initialization complete for process ' + child.pid);
+      await openClient(client);
+      assert.deepEqual(await marker(client), [], 'A new profile inherited another profile cookie');
+      const written = await client.api.call('Network.setCookie', { url: markerUrl, name: 'profile-isolation-marker',
+        value: 'FAKE_PROFILE_' + index, httpOnly: true, secure: true, expires: Math.floor(Date.now() / 1000) + 3600 });
+      assert.equal(written.success, true);
+      assert.deepEqual(await marker(client), ['FAKE_PROFILE_' + index]);
+      console.log('Profile fixture: isolated cookie and two-stream configuration verified for profile ' + index);
+      if (index === 1) {
+        const duplicate = launch(profile, await freePort());
+        const deadline = Date.now() + 30000;
+        while (isRunning(duplicate) && Date.now() < deadline) await pause(100);
+        assert.equal(duplicate.exitCode, 0, 'A duplicate failed even with only one profile open');
+        assert(isRunning(child), 'Single-profile duplicate stopped the original');
+        report.singleProfileDuplicateExited = true;
+        console.log('Profile fixture: duplicate control with one profile passed');
+      }
     }
     const deadline = Date.now() + 60000;
     for (;;) {
@@ -65,16 +160,26 @@ function launch(profile) {
     await pause(3000);
     assert(profiles.every(profile => isRunning(profile.child)), 'Four profiles did not stay open concurrently');
     console.log('Profile fixture: four first-use profiles loaded and remain open');
-    const duplicate = launch(profiles[0].path);
+    for (let index = 0; index < profiles.length; index++) assert.deepEqual(await marker(profiles[index]), ['FAKE_PROFILE_' + (index + 1)]);
+    report.cookieIsolation = true;
+    report.twoStreamDefaults = true;
+    const duplicate = launch(profiles[0].path, await freePort());
     const duplicateDeadline = Date.now() + 30000;
     while (isRunning(duplicate) && !duplicate.launchError && Date.now() < duplicateDeadline) await pause(250);
     assert(!duplicate.launchError, 'Duplicate launch failed before testing the lock');
     assert.equal(duplicate.exitCode, 0, 'Opening an existing profile did not exit cleanly');
     console.log('Profile fixture: duplicate profile exited cleanly');
     assert(profiles.every(profile => isRunning(profile.child)), 'Duplicate launch stopped an existing profile');
-    await stop(profiles[0].child);
+    await quitProfile(profiles[0]);
     await pause(1000);
     assert(profiles.slice(1).every(profile => isRunning(profile.child)), 'Closing one profile stopped another');
+    const reopened = { path: profiles[0].path, child: launch(profiles[0].path, await freePort()) };
+    profiles[0] = reopened;
+    await openClient(reopened);
+    assert.deepEqual(await marker(reopened), ['FAKE_PROFILE_1'], 'Reopened profile did not retain its own cookie');
+    for (let index = 1; index < profiles.length; index++) assert.deepEqual(await marker(profiles[index]), ['FAKE_PROFILE_' + (index + 1)]);
+    report.profileReopened = true;
+    report.cookiePersistedAfterRestart = true;
     report.simultaneousProfiles = profiles.length;
     report.firstLaunchCreatedProfiles = true;
     report.portableFormat = 'directory-zip';
@@ -98,11 +203,15 @@ function launch(profile) {
       `$CaptureGraphics.Dispose(); $CaptureImage.Dispose();`,
     ], { encoding: 'utf8', timeout: 10000 });
     console.error('Native process inspection: ' + diagnostic.stdout?.slice(0, 4000));
+    report.processInspection = { status: diagnostic.status, errorCode: diagnostic.error?.code || null };
     report.diagnostics = children.map(child => ({ pid: child.pid, exitCode: child.exitCode, signalCode: child.signalCode, launchError: child.launchError, output: child.output }));
     console.error(JSON.stringify(report.diagnostics));
     console.error(error.message);
     process.exitCode = 1;
   } finally {
+    for (const profile of profiles) {
+      try { await quitProfile(profile); } catch (error) { console.error(error.message); process.exitCode = 1; }
+    }
     for (const child of children) {
       try { await stop(child); }
       catch (error) { console.error(error.message); process.exitCode = 1; }
