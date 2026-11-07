@@ -16,7 +16,7 @@ const reportPath = path.resolve(process.argv[3] || path.join(root, 'release-outp
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'twitchterino profile validation-'));
 const children = [];
 const profiles = [];
-const report = { version: pkg.version, scope: 'four empty portable profiles; no account or point awards', graphics: 'software rendering in the multi-process CI fixture', passed: false };
+const report = { version: pkg.version, scope: 'four empty portable profiles; no account or point awards', graphics: 'application defaults; loopback CDP observation only', passed: false };
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function freePort() {
   const server = net.createServer();
@@ -103,13 +103,17 @@ async function quitProfile(profile, timeoutMs = 10000) {
 }
 function launch(profile, port, argumentOnly = false) {
   console.log('Profile fixture: launch requested at ' + new Date().toISOString() + ', free MiB ' + Math.round(os.freemem() / 1048576));
-  const env = { ...process.env, TWITCHTERINO_DATA: profile, TWITCHTERINO_DEBUG: '1', ELECTRON_NO_ATTACH_CONSOLE: '1' };
-  const args = ['--disable-gpu', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=' + port];
+  const env = { ...process.env, TWITCHTERINO_DATA: profile, ELECTRON_NO_ATTACH_CONSOLE: '1' };
+  delete env.TWITCHTERINO_DEBUG;
+  const args = ['--remote-debugging-address=127.0.0.1', '--remote-debugging-port=' + port];
   if (argumentOnly) { delete env.TWITCHTERINO_DATA; args.push('--twitchterino-data=' + profile); }
-  const child = spawn(executable, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const logFile = path.join(temporary, 'client-' + children.length + '.log');
+  const logHandle = fs.openSync(logFile, 'w');
+  let child;
+  try { child = spawn(executable, args, { env, stdio: ['ignore', logHandle, logHandle] }); }
+  finally { fs.closeSync(logHandle); }
   child.port = port;
-  child.output = '';
-  for (const stream of [child.stdout, child.stderr]) stream.on('data', data => { child.output = (child.output + data).slice(0, 6000); });
+  child.logFile = logFile;
   child.on('error', error => { child.launchError = error.message; });
   children.push(child);
   console.log('Profile fixture: launched process ' + child.pid);
@@ -125,14 +129,8 @@ function launch(profile, port, argumentOnly = false) {
       const child = launch(profile, await freePort());
       const client = { path: profile, child };
       profiles.push(client);
-      const startupDeadline = Date.now() + 30000;
-      while (!child.output.includes('profile initialization complete')) {
-        assert(!child.launchError && isRunning(child), 'A profile exited during initialization');
-        assert(Date.now() < startupDeadline, 'A profile did not complete initialization');
-        await pause(250);
-      }
-      console.log('Profile fixture: initialization complete for process ' + child.pid);
       await openClient(client);
+      console.log('Profile fixture: actual UI and metadata ready for process ' + child.pid);
       assert.equal((await evaluate(client.ui, 'window.tt.getState()')).openAtLogin, false, 'Another profile changed this startup entry');
       assert.equal((await evaluate(client.ui, 'window.tt.setAutostart(true)')).openAtLogin, true, 'Profile startup entry did not retain its arguments');
       assert.deepEqual(await marker(client), [], 'A new profile inherited another profile cookie');
@@ -214,7 +212,8 @@ function launch(profile, port, argumentOnly = false) {
     ], { encoding: 'utf8', timeout: 10000 });
     console.error('Native process inspection: ' + diagnostic.stdout?.slice(0, 4000));
     report.processInspection = { status: diagnostic.status, errorCode: diagnostic.error?.code || null };
-    report.diagnostics = children.map(child => ({ pid: child.pid, exitCode: child.exitCode, signalCode: child.signalCode, launchError: child.launchError, output: child.output }));
+    report.diagnostics = children.map(child => ({ pid: child.pid, exitCode: child.exitCode, signalCode: child.signalCode, launchError: child.launchError,
+      output: fs.existsSync(child.logFile) ? fs.readFileSync(child.logFile, 'utf8').slice(-6000) : '' }));
     console.error(JSON.stringify(report.diagnostics));
     console.error(error.message);
     process.exitCode = 1;
@@ -229,7 +228,7 @@ function launch(profile, port, argumentOnly = false) {
     for (const child of children) {
       try { await stop(child); }
       catch (error) { console.error(error.message); process.exitCode = 1; }
-      child.stdout.destroy(); child.stderr.destroy(); child.unref();
+      child.stdout?.destroy(); child.stderr?.destroy(); child.unref();
     }
     fs.mkdirSync(path.dirname(reportPath), { recursive: true });
     fs.writeFileSync(reportPath, JSON.stringify(report, null, 2) + '\n');
