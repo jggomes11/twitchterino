@@ -4,6 +4,15 @@ const assert = require('node:assert/strict');
 const { loadApp } = require('./helpers/app.cjs');
 const platform = require('../package.json').name === 'kickterino' ? 'kick' : 'twitch';
 
+test('a second launch without the profile lock cannot initialize another client', async () => {
+  const app = loadApp({ singleInstance: false });
+  assert.equal(app.state.quit, 1);
+  assert.equal(app.state.ready.length, 0);
+  await app.start();
+  assert.equal(app.state.writes.length, 0);
+  assert.equal(app.state.requests.length, 0);
+});
+
 test('actual application queries do not execute credentials in an external login page', async () => {
   const app = loadApp();
   const result = platform === 'twitch' ? await app.apiExports.query('{currentUser{login}}') : await app.apiExports.query('/api/v1/user');

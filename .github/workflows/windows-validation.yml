@@ -4,21 +4,44 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
+    inputs:
+      runner:
+        description: Native Windows environment
+        type: choice
+        options: [windows-2025, windows-2022]
+        default: windows-2025
+      release:
+        description: Build Windows installer and portable release candidates
+        type: boolean
+        default: false
+      publish_release:
+        description: Publish verified release assets (main branch only, requires release)
+        type: boolean
+        default: false
+      upload_preview:
+        description: Upload this verified build to an existing preview draft
+        type: boolean
+        default: false
+      preview_tag:
+        description: Existing prerelease draft tag (must target this exact source)
+        type: string
+        default: v0.1.3-rc.3
 
 permissions:
   contents: read
 
 concurrency:
-  group: windows-validation-${{ github.ref }}
+  group: windows-validation-${{ github.ref }}-${{ inputs.runner == 'windows-2022' && 'windows-2022' || 'windows-2025' }}
   cancel-in-progress: true
 
 jobs:
   windows:
     name: Native Windows UI and packaging
-    runs-on: windows-2022
+    runs-on: ${{ inputs.runner == 'windows-2022' && 'windows-2022' || 'windows-2025' }}
     timeout-minutes: 25
     env:
       VALIDATION_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      BUILD_RELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.release || false }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -44,9 +67,15 @@ jobs:
           npm audit --omit=dev
       - name: Package Windows without publishing
         id: package
-        run: npm run dist -- --dir --publish never
+        run: |
+          if ($env:BUILD_RELEASE -eq 'true') { npm run dist -- --win nsis --x64 --publish never }
+          else { npm run dist -- --dir --publish never }
       - name: Validate packaged UI and official login navigation
         run: node scripts/validate-desktop.cjs
+      - name: Validate four account partitions in one application
+        if: success() && env.BUILD_RELEASE != 'true'
+        timeout-minutes: 5
+        run: node scripts/validate-accounts.cjs dist/win-unpacked/Twitchterino.exe validation-output/evidence/account-validation.json
       - name: Prepare isolated manual validation bundle
         if: always() && steps.package.outcome == 'success'
         run: node scripts/package-windows-validation.cjs
@@ -61,6 +90,34 @@ jobs:
           New-Item -ItemType Directory -Path $ProbeProfile -Force | Out-Null
           try { ./validation-output/Start-WindowsValidation.ps1 -CheckOnly -ProfileCommit '000000000000' }
           finally { Remove-Item -LiteralPath $ProbeProfile -Force }
+      - name: Prepare Windows release candidates
+        if: success() && env.BUILD_RELEASE == 'true'
+        run: node scripts/package-windows-release.cjs
+      - name: Validate four accounts in the actual portable application
+        if: success() && env.BUILD_RELEASE == 'true'
+        timeout-minutes: 5
+        run: node scripts/validate-accounts.cjs
+      - name: Archive portable profiles and calculate release checksums
+        if: success() && env.BUILD_RELEASE == 'true'
+        run: |
+          $ReleaseVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          Compress-Archive -Path release-output/portable/* -DestinationPath "release-output/Twitchterino-$ReleaseVersion-Windows-x64-4-contas.zip"
+          Get-ChildItem release-output -File | Where-Object { $_.Extension -in '.exe', '.zip' } | Sort-Object Name | ForEach-Object {
+            $ReleaseHash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$ReleaseHash  $($_.Name)"
+          } | Set-Content -Encoding ascii release-output/SHA256SUMS.txt
+      - name: Preserve verified Windows release candidates
+        if: success() && env.BUILD_RELEASE == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-release-${{ github.sha }}
+          path: |
+            release-output/*.exe
+            release-output/*.zip
+            release-output/*.txt
+            release-output/*.json
+          retention-days: 7
+          if-no-files-found: error
       - name: Preserve Windows evidence and validation build
         # The launcher checks hashes without opening another GUI during CI.
         if: always()
@@ -72,3 +129,91 @@ jobs:
           include-hidden-files: true
           if-no-files-found: warn
 
+  publish-release:
+    needs: windows
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.release && inputs.publish_release && !inputs.upload_preview
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Download candidates from this successful Windows run
+        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "windows-release-$GITHUB_SHA" --dir release-output
+      - name: Verify source identity and asset checksums
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re
+          root = pathlib.Path('release-output')
+          package = json.loads(pathlib.Path('package.json').read_text())
+          info = json.loads((root / 'release-build-info.json').read_text())
+          version = package['version']
+          assert re.fullmatch(r'\d+\.\d+\.\d+', version), 'Expected stable release version'
+          assert info['sourceSha'] == os.environ['GITHUB_SHA'], 'Unexpected candidate source'
+          assert info['version'] == version and info['accounts'] == 4 and info['applicationWindows'] == 1 and info['portableFormat'] == 'directory-zip'
+          expected = {'Twitchterino-Setup.exe', f'Twitchterino-{version}-Windows-x64-4-contas.zip'}
+          seen = set()
+          for line in (root / 'SHA256SUMS.txt').read_text().splitlines():
+              digest, name = line.split('  ', 1)
+              assert name in expected and name not in seen, 'Unexpected or duplicate release asset'
+              assert hashlib.file_digest((root / name).open('rb'), 'sha256').hexdigest() == digest, 'Asset checksum mismatch'
+              seen.add(name)
+          assert seen == expected, 'Missing release asset'
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write(f'RELEASE_VERSION={version}\nRELEASE_TAG=v{version}\n')
+          print('Verified installer, four-account ZIP and source identity.')
+          PY
+      - name: Create draft, upload verified assets and publish
+        run: |
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Twitchterino $RELEASE_VERSION — quatro contas" --notes-file docs/releases/v0.1.3.pt-BR.md --draft
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" release-output/Twitchterino-Setup.exe "release-output/Twitchterino-$RELEASE_VERSION-Windows-x64-4-contas.zip" release-output/SHA256SUMS.txt release-output/release-build-info.json
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+
+  upload-preview:
+    needs: windows
+    if: github.event_name == 'workflow_dispatch' && inputs.release && inputs.upload_preview && !inputs.publish_release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PREVIEW_TAG: ${{ inputs.preview_tag }}
+    steps:
+      - name: Download candidates from this successful native Windows run
+        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "windows-release-$GITHUB_SHA" --dir release-output
+      - name: Verify source, checksums, native result and existing draft identity
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" > releases.json
+          python3 - <<'PYVERIFY'
+          import hashlib, json, os, pathlib, re
+          root = pathlib.Path('release-output')
+          info = json.loads((root / 'release-build-info.json').read_text())
+          assert info['sourceSha'] == os.environ['GITHUB_SHA']
+          assert info['accounts'] == 4 and info['applicationWindows'] == 1 and info['portableFormat'] == 'directory-zip'
+          native = json.loads((root / 'account-validation.json').read_text())
+          assert native['passed'] is True and native['sourceSha'] == os.environ['GITHUB_SHA']
+          expected = {'Twitchterino-Setup.exe', f"Twitchterino-{info['version']}-Windows-x64-4-contas.zip"}
+          seen = set()
+          for line in (root / 'SHA256SUMS.txt').read_text().splitlines():
+              digest, name = line.split('  ', 1)
+              assert name in expected and name not in seen
+              assert hashlib.file_digest((root / name).open('rb'), 'sha256').hexdigest() == digest
+              seen.add(name)
+          assert seen == expected
+          tag = os.environ['PREVIEW_TAG']
+          assert re.fullmatch(r'v\d+\.\d+\.\d+-rc\.\d+', tag)
+          release, = [r for r in json.loads(pathlib.Path('releases.json').read_text()) if r['tag_name'] == tag]
+          assert release['draft'] and release['prerelease'] and release['target_commitish'] == os.environ['GITHUB_SHA']
+          print('Verified same-run source, native four-account fixture, checksums and draft identity.')
+          PYVERIFY
+      - name: Upload candidate assets to the verified draft without publishing
+        run: |
+          gh release upload "$PREVIEW_TAG" --repo "$GITHUB_REPOSITORY" release-output/Twitchterino-Setup.exe release-output/*.zip release-output/SHA256SUMS.txt release-output/release-build-info.json release-output/account-validation.json

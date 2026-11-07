@@ -1,8 +1,8 @@
 {
   "name": "twitchterino",
   "productName": "Twitchterino",
-  "version": "0.1.2",
-  "description": "Chat e pontos do canal da Twitch para o PokeIdle: mostra o saldo de cada canal com o pre\u00e7o real dos b\u00f4nus.",
+  "version": "0.1.3",
+  "description": "Chat e pontos do canal da Twitch para o PokeIdle: mostra o saldo de cada canal com o preço real dos bônus.",
   "author": "VinniiSaantos",
   "license": "MIT",
   "homepage": "https://github.com/jggomes11/twitchterino#readme",
@@ -34,7 +34,10 @@
       }
     ],
     "files": [
+      "LICENSE",
       "main.js",
+      "account-runtime.js",
+      "account-manager.js",
       "preload.js",
       "renderer/**/*",
       "build/icon.png",
@@ -49,8 +52,7 @@
     },
     "win": {
       "target": [
-        "nsis",
-        "portable"
+        "nsis"
       ],
       "icon": "build/icon.png"
     },
@@ -62,9 +64,6 @@
       "createStartMenuShortcut": true,
       "shortcutName": "Twitchterino",
       "runAfterFinish": true
-    },
-    "portable": {
-      "artifactName": "Twitchterino-portatil.exe"
     },
     "linux": {
       "target": [

@@ -78,3 +78,11 @@ button:disabled { opacity: .5; cursor: default; }
 .tab-chest { margin-left: 4px; font-size: 11px; }
 .soon { font-size: 10px; padding: 1px 6px; border-radius: 999px; border: 1px dashed rgba(255, 207, 74, .6); color: var(--gold); }
 .badge.reward-tag { background: rgba(169, 112, 255, .2); color: #d9c2ff; }
+
+/* One window, four independently authenticated accounts. */
+#accounts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; padding: 10px 14px 4px; flex-shrink: 0; }
+.account-tab { display: flex; flex-direction: column; gap: 3px; min-width: 0; padding: 9px 12px; text-align: left; border-radius: 8px; }
+.account-tab b, .account-tab small { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.account-tab small { color: var(--muted); font-size: 11px; }
+.account-tab.active { border-color: var(--kick); background: rgba(145, 70, 255, .16); box-shadow: inset 0 -2px var(--kick); }
+#account-hint { margin: 0; padding: 2px 14px 8px; color: var(--muted); font-size: 11px; flex-shrink: 0; }
