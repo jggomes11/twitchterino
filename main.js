@@ -56,7 +56,7 @@ function setOpenAtLogin(on) {
 
 
 function showMain(accountId) {
-  if (accountId) manager.select(accountId);
+  if (accountId && mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('account:activate', accountId);
   if (!mainWin) return;
   if (mainWin.isMinimized()) mainWin.restore();
   mainWin.show(); mainWin.focus();

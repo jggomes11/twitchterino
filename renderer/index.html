@@ -28,6 +28,9 @@
     <button id="btn-panel" class="icon wide" title="Painel de pontos e bônus">Bônus ▸</button>
   </header>
 
+  <nav id="accounts" aria-label="Contas da Twitch"></nav>
+  <p id="account-hint">Até quatro contas independentes. As outras continuam coletando quando você troca a conta exibida.</p>
+
   <div id="settings" hidden>
     <h3>Configurações</h3>
     <label class="toggle"><input type="checkbox" id="watch-all"> <span><b>Todas as lives online</b><small>Com Juntar pontos ligado, inicia os canais da lista e os que entrarem ao vivo. Não precisa abrir cada player.</small></span></label>
@@ -94,7 +97,7 @@
         <div id="tools">
           <button id="btn-report" title="Pontos, bônus comprados e tempo com bônus ativo nos últimos 7 dias">📊 Relatório da semana</button>
         </div>
-        <p class="hint">A Twitch dá 10 pontos a cada 5 min por live assistida (sub ganha mais: ×1,2 no nível 1, ×1,4 no 2 e ×2 no 3). O baú de bônus vale +50 quando você clica nele. O preço dos bônus é lido da loja de cada canal. O app usa uma conta por vez. Selecionar um canal muda o chat; Juntar pontos inicia os players automaticamente. Confira o ganho pelo saldo de cada canal.</p>
+        <p class="hint">A Twitch dá 10 pontos a cada 5 min por live assistida (sub ganha mais: ×1,2 no nível 1, ×1,4 no 2 e ×2 no 3). O baú de bônus vale +50 quando você clica nele. O preço dos bônus é lido da loja de cada canal. Cada conta mantém seus próprios canais, pontos e bônus. Selecionar um canal muda o chat; Juntar pontos inicia os players automaticamente. Confira o ganho pelo saldo de cada canal.</p>
       </aside>
     </main>
   </div>
@@ -103,6 +106,7 @@
   <div id="toasts"></div>
   <canvas id="confetti"></canvas>
 
+  <script src="../security/account-view.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>
