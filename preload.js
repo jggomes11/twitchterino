@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 const uiArgument = process.argv.find((arg) => arg.startsWith('--app-ui-url='));
 if (process.isMainFrame && uiArgument && location.href === uiArgument.slice('--app-ui-url='.length)) {
   let selectedAccountId = 'account-1';
+  let selectionInitialized = false;
   const accountInvoke = async (command, ...args) => {
     const accountId = selectedAccountId;
     const reply = await ipcRenderer.invoke('account:command', { accountId, command, args });
@@ -14,11 +15,19 @@ if (process.isMainFrame && uiArgument && location.href === uiArgument.slice('--a
   contextBridge.exposeInMainWorld('tt', {
     selectAccount: (id) => {
       if (!/^account-[1-4]$/.test(id)) return Promise.reject(new Error('Invalid account'));
+      selectionInitialized = true;
       selectedAccountId = id;
       return ipcRenderer.invoke('account:select', id);
     },
     onAccountSelect: (callback) => ipcRenderer.on('account:activate', (_event, id) => callback(id)),
-    getState: () => ipcRenderer.invoke('state:get'),
+    getState: async () => {
+      const state = await ipcRenderer.invoke('state:get');
+      if (!selectionInitialized && /^account-[1-4]$/.test(state.accountId)) {
+        selectedAccountId = state.accountId;
+        selectionInitialized = true;
+      }
+      return state;
+    },
     addChannel: (slug) => accountInvoke('channels:add', slug),
     removeChannel: (slug) => accountInvoke('channels:remove', slug),
     setFarming: (on) => accountInvoke('farming:set', on),

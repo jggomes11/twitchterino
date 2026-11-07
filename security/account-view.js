@@ -4,15 +4,20 @@
   function createAccountViewGuard(initialAccountId = 'account-1') {
     let accountId = initialAccountId;
     let epoch = 0;
+    let initialized = false;
     const current = () => ({ accountId, epoch });
     const isCurrent = ticket => ticket.accountId === accountId && ticket.epoch === epoch;
     return {
       current, isCurrent, get accountId() { return accountId; },
       select(id) {
         if (!/^account-[1-4]$/.test(id)) throw new Error('Invalid account');
-        accountId = id; epoch++; return current();
+        initialized = true; accountId = id; epoch++; return current();
       },
-      accept(snapshot) { return !!snapshot && snapshot.accountId === accountId; },
+      accept(snapshot) {
+        if (!snapshot || !/^account-[1-4]$/.test(snapshot.accountId)) return false;
+        if (!initialized) { accountId = snapshot.accountId; initialized = true; }
+        return snapshot.accountId === accountId;
+      },
       async run(operation) {
         const ticket = current();
         const result = await operation();

@@ -450,7 +450,7 @@ function renderAccounts() {
 
 async function selectAccount(id) {
   const previous = accountView.accountId;
-  if (id === previous) return;
+  if (id === previous) return true;
   const ticket = accountView.select(id);
   // Dismiss the old account's UI without issuing commands against the new account.
   $('#modal').hidden = true; modalKind = null;
@@ -460,12 +460,13 @@ async function selectAccount(id) {
   renderAccounts(); renderTabs(); renderHeader(); renderPanel();
   try {
     const next = await api.selectAccount(id);
-    if (accountView.isCurrent(ticket)) applyState(next);
+    return accountView.isCurrent(ticket) && applyState(next);
   } catch {
-    if (!accountView.isCurrent(ticket)) return;
+    if (!accountView.isCurrent(ticket)) return false;
     accountView.select(previous);
     applyState(await api.selectAccount(previous));
     toast('Não foi possível trocar a conta. Tente novamente.');
+    return false;
   }
 }
 
@@ -691,9 +692,17 @@ function chatAlert(slug, data, flags) {
     if (Date.now() - (lastGiveawayAlert.get(slug) || 0) < 5 * 60 * 1000) return;
     lastGiveawayAlert.set(slug, Date.now());
   }
-  const n = new Notification(flags.mention ? `${data.sender.username} mencionou você em ${name}` : `🎉 Sorteio no chat de ${name}`,
+  const ownerAccountId = accountView.accountId;
+  const accountName = state.username || ownerAccountId;
+  const title = flags.mention ? `${data.sender.username} mencionou você em ${name}` : `🎉 Sorteio no chat de ${name}`;
+  const n = new Notification(`${accountName} · ${title}`,
     { body: String(data.content || '').replace(/\[emote:[^:]+:([^\]]*)\]/g, '$1').slice(0, 140), icon: '../build/icon.png' });
-  n.onclick = () => { window.focus(); select(slug); };
+  n.onclick = async () => {
+    window.focus();
+    const activation = selectAccount(ownerAccountId);
+    const ticket = accountView.current();
+    if (await activation && accountView.isCurrent(ticket) && state.channels.some(c => c.slug === slug)) select(slug);
+  };
 }
 
 // ---------- Comemorações ----------

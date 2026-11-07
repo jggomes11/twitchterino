@@ -41,3 +41,37 @@ test('renderer accepts the frozen bridge returned by native Electron contextBrid
  const result=await vm.runInNewContext(prefix+'\napi.getState();',{window:{tt:nativeBridge},AccountView:{createAccountViewGuard},document:{querySelector(){}}});
  assert.equal(reads,1);assert.equal(result.accountId,'account-1');
 });
+
+test('reload synchronizes the saved active account into both the bridge and view before commands',async()=>{
+ const source=fs.readFileSync(require('node:path').join(__dirname,'../preload.js'),'utf8');
+ const calls=[],listeners=new Map();let tt;
+ vm.runInNewContext(source,{process:{isMainFrame:true,argv:['--app-ui-url=file:///ui.html']},location:{href:'file:///ui.html'},require:()=>({contextBridge:{exposeInMainWorld(_n,b){tt=b;}},ipcRenderer:{invoke:async(channel,...args)=>{calls.push([channel,...args]);return channel==='account:command'?{accountId:args[0].accountId,result:{channels:[]}}:{accountId:'account-2',channels:[]};},on:(k,fn)=>listeners.set(k,fn)}})});
+ const view=createAccountViewGuard();
+ assert.equal(view.accept(await tt.getState()),true);
+ assert.equal(view.accountId,'account-2');
+ await tt.setFarming(false);assert.equal(calls.at(-1)[1].accountId,'account-2');
+ let received=false;tt.onStatus(()=>{received=true;});listeners.get('status')({}, {accountId:'account-2'});assert.equal(received,true);
+});
+
+test('a delayed chat notification activates its source account and obeys later selection',async()=>{
+ const source=fs.readFileSync(require('node:path').join(__dirname,'../renderer/renderer.js'),'utf8');
+ const functionSource=source.slice(source.indexOf('function chatAlert('),source.indexOf('// ---------- Comemorações'));
+ const view=createAccountViewGuard();const notifications=[],selected=[],activations=[];
+ let release;
+ const context={state:{notifyChat:true,username:'Account A',channels:[{slug:'rodil',displayName:'Rodil'}]},active:null,document:{hasFocus:()=>false},lastGiveawayAlert:new Map(),accountView:view,
+  window:{focus(){}},Notification:class {constructor(title){this.title=title;notifications.push(this);}},
+  select:slug=>selected.push({accountId:view.accountId,slug}),selectAccount:id=>{activations.push(id);view.select(id);return new Promise(resolve=>{release=resolve;});}};
+ vm.runInNewContext(functionSource+'\nchatAlert("rodil",{sender:{username:"Viewer"},content:"@Account A"},{mention:true});',context);
+ view.select('account-2');const pending=notifications[0].onclick();
+ assert.deepEqual(activations,['account-1']);assert.match(notifications[0].title,/Account A/);
+ release(true);await pending;assert.deepEqual(selected,[{accountId:'account-1',slug:'rodil'}]);
+ selected.length=0;view.select('account-2');const raced=notifications[0].onclick();view.select('account-3');release(true);await raced;assert.equal(selected.length,0);
+});
+
+test('an initial read completing late cannot override an explicit account selection',async()=>{
+ const source=fs.readFileSync(require('node:path').join(__dirname,'../preload.js'),'utf8');let tt,release;const calls=[];
+ vm.runInNewContext(source,{process:{isMainFrame:true,argv:['--app-ui-url=file:///ui.html']},location:{href:'file:///ui.html'},require:()=>({contextBridge:{exposeInMainWorld(_n,b){tt=b;}},ipcRenderer:{invoke:async(channel,...args)=>{calls.push([channel,...args]);if(channel==='state:get')return new Promise(resolve=>{release=resolve;});return channel==='account:command'?{accountId:args[0].accountId,result:{channels:[]}}:{accountId:args[0],channels:[]};},on(){}}})});
+ const pending=tt.getState();await tt.selectAccount('account-3');release({accountId:'account-2',channels:[]});await pending;
+ await tt.setFarming(false);assert.equal(calls.at(-1)[1].accountId,'account-3');
+ const view=createAccountViewGuard();view.select('account-3');assert.equal(view.accept({accountId:'account-2'}),false);
+});
