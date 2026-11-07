@@ -6,9 +6,10 @@ const { EventEmitter } = require('node:events');
 const { pathToFileURL } = require('node:url');
 const { createRequire } = require('node:module');
 
-function loadApp({ packaged = false, platform = 'win32', configSeed = null, singleInstance = true } = {}) {
+function loadApp({ packaged = false, platform = 'win32', configSeed = null, singleInstance = true, env = {}, argv = [], loginRegistry = new Map() } = {}) {
   const root = path.resolve(__dirname, '../..');
   const state = { scripts: [], requests: [], writes: [], quit: 0, updates: 0, windows: [], ready: [], dialogResponse: 0, sockets: [], timers: [], reloads: [] };
+  state.paths = {}; state.loginItems = []; state.loginQueries = [];
   const cookies = new EventEmitter();
   cookies.get = async ({ name }) => [{ value: name === 'auth-token' || name === 'session_token' ? 'FAKE_ACCOUNT_TOKEN' : 'FAKE_OTHER_COOKIE' }];
   const session = {
@@ -51,10 +52,17 @@ function loadApp({ packaged = false, platform = 'win32', configSeed = null, sing
   app = new EventEmitter();
   Object.assign(app, {
     commandLine: { appendSwitch() {} }, userAgentFallback: 'Chrome/100 Electron/45', isPackaged: packaged,
-    getPath: name => '/fake/' + name, setPath() {}, getVersion: () => JSON.parse(fs.readFileSync(path.join(root, 'package.json'))).version,
+    getPath: name => state.paths[name] || '/fake/' + name, setPath: (name, value) => { state.paths[name] = value; }, getVersion: () => JSON.parse(fs.readFileSync(path.join(root, 'package.json'))).version,
     requestSingleInstanceLock: () => singleInstance, quit: () => { state.quit++; }, setAppUserModelId() {}, getAppMetrics: () => [],
     whenReady: () => ({ then: callback => { state.ready.push(callback); } }),
-    getLoginItemSettings: () => ({ openAtLogin: false }), setLoginItemSettings() {},
+    getLoginItemSettings: query => {
+      state.loginQueries.push(query);
+      const legacy = loginRegistry.get('app-default');
+      return { openAtLogin: !!legacy?.openAtLogin && legacy.path === query.path && JSON.stringify(legacy.args) === JSON.stringify(query.args),
+        launchItems: [...loginRegistry.entries()].filter(([, item]) => item.path === query.path)
+          .map(([name, item]) => ({ name, path: item.path, args: item.args, scope: 'user', enabled: item.openAtLogin })) };
+    },
+    setLoginItemSettings: item => { state.loginItems.push(item); loginRegistry.set(item.name || 'app-default', item); },
   });
   const handlers = new Map();
   const image = { resize() { return this; }, getSize: () => ({ width: 16, height: 16 }) };
@@ -80,7 +88,7 @@ function loadApp({ packaged = false, platform = 'win32', configSeed = null, sing
       close() { this.readyState = 3; if (this.onclose) this.onclose(); }
     },
     __dirname: root, module: { exports: {} }, Buffer, URL, console, AbortController, TextDecoder,
-    process: { platform, env: {}, argv: [] },
+    process: { platform, env, argv, execPath: '/fake/Twitchterino.exe' },
     setTimeout: (callback, delay) => { const timer = { callback, delay, cancelled: false }; state.timers.push(timer); return timer; },
     clearTimeout(timer) { if (timer) timer.cancelled = true; }, setInterval: () => 1, clearInterval() {}, setImmediate, queueMicrotask,
   };

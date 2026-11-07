@@ -5,6 +5,11 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
     inputs:
+      runner:
+        description: Native Windows environment
+        type: choice
+        options: [windows-2025, windows-2022]
+        default: windows-2025
       release:
         description: Build Windows installer and portable release candidates
         type: boolean
@@ -22,14 +27,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: windows-validation-${{ github.ref }}
+  group: windows-validation-${{ github.ref }}-${{ inputs.runner == 'windows-2022' && 'windows-2022' || 'windows-2025' }}
   cancel-in-progress: true
 
 jobs:
   windows:
     if: ${{ !inputs.upload_preview }}
     name: Native Windows UI and packaging
-    runs-on: windows-2022
+    runs-on: ${{ inputs.runner == 'windows-2022' && 'windows-2022' || 'windows-2025' }}
     timeout-minutes: 25
     env:
       VALIDATION_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}

@@ -27,7 +27,9 @@ app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion,Ba
 app.commandLine.appendSwitch('js-flags', '--max-semi-space-size=1');
 
 // Pasta de dados alternativa (testes sem mexer na instalação de verdade).
-if (process.env.TWITCHTERINO_DATA) app.setPath('userData', process.env.TWITCHTERINO_DATA);
+const dataArgument = process.argv.find(argument => argument.startsWith('--twitchterino-data='));
+const customDataPath = dataArgument?.slice('--twitchterino-data='.length) || process.env.TWITCHTERINO_DATA;
+if (customDataPath) app.setPath('userData', customDataPath);
 
 // A Twitch recusa login de navegadores que ela não conhece: o app se apresenta como o Chrome que ele é.
 app.userAgentFallback = app.userAgentFallback.replace(/ (Electron|twitchterino|Twitchterino)\/\S+/g, '');
@@ -1360,9 +1362,21 @@ function setFarming(on) {
   send('status', snapshot());
 }
 
-const LOGIN_ITEM = { path: process.env.PORTABLE_EXECUTABLE_FILE || process.execPath, args: ['--hidden'] };
+const loginProfilePath = process.platform === 'win32' && customDataPath ? path.resolve(app.getPath('userData')) : null;
+const LOGIN_ITEM = {
+  path: process.env.PORTABLE_EXECUTABLE_FILE || process.execPath,
+  args: ['--hidden', ...(loginProfilePath ? ['--twitchterino-data=' + loginProfilePath] : [])],
+  ...(loginProfilePath ? { name: 'Twitchterino-' + createHash('sha256').update(loginProfilePath.toLowerCase()).digest('hex').slice(0, 16) } : {}),
+};
 const autostartFile = () => path.join(process.env.XDG_CONFIG_HOME || path.join(app.getPath('home'), '.config'), 'autostart', 'twitchterino.desktop');
-const isOpenAtLogin = () => (isLinux ? fs.existsSync(autostartFile()) : app.getLoginItemSettings(LOGIN_ITEM).openAtLogin);
+function isOpenAtLogin() {
+  if (isLinux) return fs.existsSync(autostartFile());
+  const settings = app.getLoginItemSettings(LOGIN_ITEM);
+  // Electron's legacy openAtLogin checks only the default AppUserModelID entry.
+  if (LOGIN_ITEM.name) return Array.isArray(settings.launchItems) && settings.launchItems.some(item =>
+    item.name === LOGIN_ITEM.name && item.scope === 'user' && item.enabled === true);
+  return settings.openAtLogin;
+}
 function setOpenAtLogin(on) {
   if (!isLinux) return app.setLoginItemSettings({ ...LOGIN_ITEM, openAtLogin: on });
   const file = autostartFile();

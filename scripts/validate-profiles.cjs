@@ -13,7 +13,7 @@ assert.equal(process.platform, 'win32', 'Validate portable profile processes on 
 const root = path.resolve(__dirname, '..');
 const executable = path.resolve(process.argv[2] || path.join(root, 'release-output', 'portable', 'app', 'Twitchterino.exe'));
 const reportPath = path.resolve(process.argv[3] || path.join(root, 'release-output', 'profile-validation.json'));
-const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'twitchterino-profile-validation-'));
+const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'twitchterino profile validation-'));
 const children = [];
 const profiles = [];
 const report = { version: pkg.version, scope: 'four empty portable profiles; no account or point awards', graphics: 'software rendering in the multi-process CI fixture', passed: false };
@@ -60,8 +60,8 @@ async function evaluate(client, expression) {
   assert(!result.exceptionDetails, 'Profile UI operation failed');
   return result.result.value;
 }
-async function openClient(profile) {
-  const deadline = Date.now() + 30000;
+async function openClient(profile, timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     assert(isRunning(profile.child), 'Profile exited before its UI was ready');
     try {
@@ -72,9 +72,10 @@ async function openClient(profile) {
         profile.ui = await connect(ui.webSocketDebuggerUrl);
         profile.api = await connect(api.webSocketDebuggerUrl);
         const state = await evaluate(profile.ui, 'window.tt && window.tt.getState()');
-        if (state?.channels?.length && state.channels.every(channel => typeof channel.live === 'boolean')) {
+        if (state?.channels?.length && state.channels.every(channel => channel.rewardsLoaded === true && !channel.error)) {
           assert.equal(state.loggedIn, false, 'A CI profile must have no real account');
           assert.equal(state.watchAll, false); assert.equal(state.maxWatchers, 2); assert.equal(state.rotation, true);
+          assert.equal(state.farming, true); assert.equal(state.autoChest, true);
           return;
         }
       }
@@ -89,18 +90,23 @@ async function marker(profile) {
   const result = await profile.api.call('Network.getCookies', { urls: [markerUrl] });
   return result.cookies.filter(c => c.name === 'profile-isolation-marker').map(c => c.value);
 }
-async function quitProfile(profile) {
+async function quitProfile(profile, timeoutMs = 10000) {
   if (profile.ui && isRunning(profile.child)) {
     try { await evaluate(profile.ui, 'window.tt.quit()'); } catch {}
-    const deadline = Date.now() + 10000;
+    const deadline = Date.now() + timeoutMs;
     while (isRunning(profile.child) && Date.now() < deadline) await pause(100);
   }
+  // CDP may close before acknowledging quit; an actual clean exit is the proof.
+  assert(!isRunning(profile.child), 'Application did not quit gracefully');
+  assert.equal(profile.child.exitCode, 0, 'Application did not exit successfully after quit');
   profile.ui?.close(); profile.api?.close();
-  await stop(profile.child);
 }
-function launch(profile, port) {
+function launch(profile, port, argumentOnly = false) {
   console.log('Profile fixture: launch requested at ' + new Date().toISOString() + ', free MiB ' + Math.round(os.freemem() / 1048576));
-  const child = spawn(executable, ['--disable-gpu', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=' + port], { env: { ...process.env, TWITCHTERINO_DATA: profile, TWITCHTERINO_DEBUG: '1', ELECTRON_NO_ATTACH_CONSOLE: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const env = { ...process.env, TWITCHTERINO_DATA: profile, TWITCHTERINO_DEBUG: '1', ELECTRON_NO_ATTACH_CONSOLE: '1' };
+  const args = ['--disable-gpu', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=' + port];
+  if (argumentOnly) { delete env.TWITCHTERINO_DATA; args.push('--twitchterino-data=' + profile); }
+  const child = spawn(executable, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
   child.port = port;
   child.output = '';
   for (const stream of [child.stdout, child.stderr]) stream.on('data', data => { child.output = (child.output + data).slice(0, 6000); });
@@ -127,6 +133,8 @@ function launch(profile, port) {
       }
       console.log('Profile fixture: initialization complete for process ' + child.pid);
       await openClient(client);
+      assert.equal((await evaluate(client.ui, 'window.tt.getState()')).openAtLogin, false, 'Another profile changed this startup entry');
+      assert.equal((await evaluate(client.ui, 'window.tt.setAutostart(true)')).openAtLogin, true, 'Profile startup entry did not retain its arguments');
       assert.deepEqual(await marker(client), [], 'A new profile inherited another profile cookie');
       const written = await client.api.call('Network.setCookie', { url: markerUrl, name: 'profile-isolation-marker',
         value: 'FAKE_PROFILE_' + index, httpOnly: true, secure: true, expires: Math.floor(Date.now() / 1000) + 3600 });
@@ -173,13 +181,15 @@ function launch(profile, port) {
     await quitProfile(profiles[0]);
     await pause(1000);
     assert(profiles.slice(1).every(profile => isRunning(profile.child)), 'Closing one profile stopped another');
-    const reopened = { path: profiles[0].path, child: launch(profiles[0].path, await freePort()) };
+    const reopened = { path: profiles[0].path, child: launch(profiles[0].path, await freePort(), true) };
     profiles[0] = reopened;
     await openClient(reopened);
+    assert.equal((await evaluate(reopened.ui, 'window.tt.getState()')).openAtLogin, true, 'Restarted account lost its own startup entry');
     assert.deepEqual(await marker(reopened), ['FAKE_PROFILE_1'], 'Reopened profile did not retain its own cookie');
     for (let index = 1; index < profiles.length; index++) assert.deepEqual(await marker(profiles[index]), ['FAKE_PROFILE_' + (index + 1)]);
     report.profileReopened = true;
     report.cookiePersistedAfterRestart = true;
+    report.windowsAutostartIsolated = true;
     report.simultaneousProfiles = profiles.length;
     report.firstLaunchCreatedProfiles = true;
     report.portableFormat = 'directory-zip';
@@ -210,7 +220,11 @@ function launch(profile, port) {
     process.exitCode = 1;
   } finally {
     for (const profile of profiles) {
-      try { await quitProfile(profile); } catch (error) { console.error(error.message); process.exitCode = 1; }
+      if (profile.ui && isRunning(profile.child)) {
+        try { assert.equal((await evaluate(profile.ui, 'window.tt.setAutostart(false)')).openAtLogin, false); }
+        catch (error) { report.passed = false; report.error ||= error.message; console.error(error.message); process.exitCode = 1; }
+      }
+      try { await quitProfile(profile); } catch (error) { report.passed = false; report.error ||= error.message; console.error(error.message); process.exitCode = 1; }
     }
     for (const child of children) {
       try { await stop(child); }
