@@ -23,6 +23,21 @@ function channelName(value, platform) {
 
 function validateIpcArgs(channel, args, context) {
   const { platform, channels = [], chatroomIds = [], viewport = [16384, 16384] } = context;
+  if (channel === 'account:select') {
+    const id = one(args);
+    if (typeof id !== 'string' || !Object.hasOwn(context.accounts || {}, id)) invalid();
+    return [id];
+  }
+  if (channel === 'account:command') {
+    const value = one(args);
+    if (!value || typeof value !== 'object' || Array.isArray(value)
+      || Object.keys(value).some(k => !['accountId', 'command', 'args'].includes(k))
+      || typeof value.accountId !== 'string' || !Object.hasOwn(context.accounts || {}, value.accountId)
+      || typeof value.command !== 'string' || !Array.isArray(value.args)
+      || ['account:command', 'account:select', 'app:quit', 'autostart:set'].includes(value.command)) invalid();
+    const checked = validateIpcArgs(value.command, value.args, { ...context.accounts[value.accountId], platform });
+    return [{ accountId: value.accountId, command: value.command, args: checked }];
+  }
   if (['state:get', 'app:quit', 'stores:cancel', 'report:get', 'intro:done', 'limitTest:start', 'limitTest:stop', 'refresh', 'login:show', 'logout'].includes(channel)) {
     if (args.length) invalid();
     return [];

@@ -36,6 +36,8 @@
     "files": [
       "LICENSE",
       "main.js",
+      "account-runtime.js",
+      "account-manager.js",
       "preload.js",
       "renderer/**/*",
       "build/icon.png",
