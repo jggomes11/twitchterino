@@ -32,3 +32,12 @@ test('preload captures account commands at call time and filters foreign-account
  listeners.get('chat')({}, {accountId:'account-2',payload:{slug:'faturetosl'}});
  assert.equal(chats.length,1); assert.equal(chats[0].slug,'faturetosl');
 });
+
+test('renderer accepts the frozen bridge returned by native Electron contextBridge', async()=>{
+ const source=fs.readFileSync(require('node:path').join(__dirname,'../renderer/renderer.js'),'utf8');
+ const prefix=source.slice(0,source.indexOf('let state ='));
+ let reads=0;
+ const nativeBridge=Object.freeze({getState:async()=>{reads++;return {accountId:'account-1'};},onStatus:()=>{}});
+ const result=await vm.runInNewContext(prefix+'\napi.getState();',{window:{tt:nativeBridge},AccountView:{createAccountViewGuard},document:{querySelector(){}}});
+ assert.equal(reads,1);assert.equal(result.accountId,'account-1');
+});

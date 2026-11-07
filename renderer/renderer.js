@@ -5,11 +5,10 @@ const MAX_MESSAGES = 400;
 const $ = (sel) => document.querySelector(sel);
 const accountView = AccountView.createAccountViewGuard();
 // All awaited UI operations capture the current view, including reports and chat replies.
-const api = new Proxy(window.tt, { get(target, key) {
-  const method = target[key];
-  if (typeof method !== 'function' || key.startsWith('on') || key === 'selectAccount') return method;
-  return (...args) => accountView.run(() => method(...args));
-} });
+const api = Object.fromEntries(Object.entries(window.tt).map(([key, method]) => [key,
+  typeof method !== 'function' || key.startsWith('on') || key === 'selectAccount' ? method
+    : (...args) => accountView.run(() => method(...args)),
+]));
 let state = { channels: [], farming: true, maxWatchers: 2 };
 let active = null;
 const buffers = new Map();
