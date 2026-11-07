@@ -64,12 +64,12 @@ async function select(client, index) {
     assertAccountReady(state, id); return state;
   }, 'Account ' + index + ' metadata/defaults', 65000);
 }
-async function openSession(client) {
+async function openSession(client, boundIds = new Set()) {
   // showLogin uses the existing official login command, not a privileged test hook.
   await evaluate(client.ui, 'void window.tt.showLogin().catch(() => {}); true');
   return until(async () => {
     for (const target of await client.targets()) {
-      if (target.type !== 'page' || !target.url.startsWith('https://www.twitch.tv/')) continue;
+      if (boundIds.has(target.id) || target.type !== 'page' || !target.url.startsWith('https://www.twitch.tv/')) continue;
       const api = await connect(target.webSocketDebuggerUrl); connections.add(api);
       try {
         if (await evaluate(api, 'document.visibilityState === "visible"')) return {id: target.id, api};
@@ -90,11 +90,11 @@ async function markers(api) {
     const apis = [];
     for (let index = 1; index <= 4; index++) {
       await select(current, index);
-      const source = await openSession(current);
+      const source = await openSession(current, new Set(apis.map(a => a.id)));
       assert(!apis.some(a => a.id === source.id), 'Two slots selected the same login window');
       const result = await source.api.call('Network.setCookie', {url: markerUrl, name: 'account-isolation-marker', value: 'FAKE_ACCOUNT_' + index, expires: Date.now() / 1000 + 86400});
       assert.equal(result.success, true); apis.push(source);
-      await source.api.call('Page.close');
+      await source.api.call('Page.navigate', {url:'https://www.twitch.tv/robots.txt'});
     }
     for (let index = 0; index < 4; index++) assert.deepEqual(await markers(apis[index].api), ['FAKE_ACCOUNT_' + (index + 1)]);
     assert.equal((await current.targets()).filter(t => /\/renderer\/index\.html$/.test(t.url)).length, 1);
@@ -113,11 +113,13 @@ async function markers(api) {
     report.checks.push('second launch focuses existing application and exits cleanly');
     await quitApplication(current);
     current = await open(launch(await freePort()));
+    const reopenedApis = [];
     for (let index = 1; index <= 4; index++) {
       await select(current, index);
-      const source = await openSession(current);
+      const source = await openSession(current, new Set(reopenedApis.map(a => a.id)));
+      reopenedApis.push(source);
       assert.deepEqual(await markers(source.api), ['FAKE_ACCOUNT_' + index]);
-      await source.api.call('Page.close');
+      await source.api.call('Page.navigate', {url:'https://www.twitch.tv/robots.txt'});
     }
     await select(current, 2);
     assert.equal((await evaluate(current.ui, 'window.tt.getState()')).notifyChat, false);
