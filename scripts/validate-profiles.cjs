@@ -104,7 +104,7 @@ async function quitProfile(profile, timeoutMs = 10000) {
 function launch(profile, port, argumentOnly = false) {
   console.log('Profile fixture: launch requested at ' + new Date().toISOString() + ', free MiB ' + Math.round(os.freemem() / 1048576));
   const env = { ...process.env, TWITCHTERINO_DATA: profile, TWITCHTERINO_DEBUG: '1', ELECTRON_NO_ATTACH_CONSOLE: '1' };
-  const args = ['--disable-gpu', '--user-data-dir=' + profile, '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=' + port];
+  const args = ['--disable-gpu', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=' + port];
   if (argumentOnly) { delete env.TWITCHTERINO_DATA; args.push('--twitchterino-data=' + profile); }
   const child = spawn(executable, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
   child.port = port;

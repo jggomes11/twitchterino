@@ -71,8 +71,8 @@ jobs:
         run: node scripts/validate-desktop.cjs
       - name: Validate four isolated profiles before release packaging
         if: success() && env.BUILD_RELEASE != 'true'
-        timeout-minutes: 5
-        run: node scripts/validate-profiles.cjs dist/win-unpacked/Twitchterino.exe validation-output/evidence/profile-validation.json
+        timeout-minutes: 7
+        run: ./scripts/Validate-AccountProfiles.ps1 -Executable dist/win-unpacked/Twitchterino.exe -ReportPath validation-output/evidence/profile-validation.json
       - name: Prepare isolated manual validation bundle
         if: always() && steps.package.outcome == 'success'
         run: node scripts/package-windows-validation.cjs
@@ -92,8 +92,8 @@ jobs:
         run: node scripts/package-windows-release.cjs
       - name: Validate four simultaneous isolated portable profiles
         if: success() && env.BUILD_RELEASE == 'true'
-        timeout-minutes: 5
-        run: node scripts/validate-profiles.cjs
+        timeout-minutes: 7
+        run: ./scripts/Validate-AccountProfiles.ps1
       - name: Archive portable profiles and calculate release checksums
         if: success() && env.BUILD_RELEASE == 'true'
         run: |
