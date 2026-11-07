@@ -9,7 +9,7 @@ const { assertAccountReady, quitApplication } = require('./account-fixture.cjs')
 const pkg = require('../package.json');
 assert.equal(process.platform, 'win32', 'Validate account partitions on native Windows');
 const root = path.resolve(__dirname, '..');
-const executable = path.resolve(process.argv[2] || path.join(root, 'release-output/portable/app/Twitchterino.exe'));
+const executable = path.resolve(process.argv[2] || path.join(root, 'dist/win-unpacked/Twitchterino.exe'));
 const reportPath = path.resolve(process.argv[3] || path.join(root, 'release-output/account-validation.json'));
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'twitchterino accounts validation-'));
 const profile = path.join(temporary, 'one application');
