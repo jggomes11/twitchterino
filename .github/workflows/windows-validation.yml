@@ -235,7 +235,7 @@ jobs:
           "$PreviewDigest  Twitchterino-0.1.3-rc.2-Windows-x64-4-contas.zip" | Set-Content -Encoding ascii SHA256SUMS-rc.2.txt
       - name: Prepare the explicitly labelled prerelease draft
         run: |
-          $PreviewRelease = gh api repos/jggomes11/twitchterino/releases/tags/v0.1.3-rc.2 | ConvertFrom-Json
+          $PreviewRelease = gh api repos/jggomes11/twitchterino/releases/437390487 | ConvertFrom-Json
           if (!$PreviewRelease.draft -or !$PreviewRelease.prerelease -or $PreviewRelease.tag_name -ne 'v0.1.3-rc.2' -or $PreviewRelease.target_commitish -ne '7c072b78f1cfc14ee930bfed194a459fd5ea31a6') { throw 'Unexpected preview identity' }
           gh release upload v0.1.3-rc.2 Twitchterino-0.1.3-rc.2-Windows-x64-4-contas.zip SHA256SUMS-rc.2.txt --repo jggomes11/twitchterino --clobber
           if ($LASTEXITCODE -ne 0) { throw 'Preview upload failed; keeping the release as draft' }
