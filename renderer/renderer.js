@@ -3,6 +3,12 @@
 const MAX_MESSAGES = 400;
 
 const $ = (sel) => document.querySelector(sel);
+const accountView = AccountView.createAccountViewGuard();
+// All awaited UI operations capture the current view, including reports and chat replies.
+const api = Object.fromEntries(Object.entries(window.tt).map(([key, method]) => [key,
+  typeof method !== 'function' || key.startsWith('on') || key === 'selectAccount' ? method
+    : (...args) => accountView.run(() => method(...args)),
+]));
 let state = { channels: [], farming: true, maxWatchers: 2 };
 let active = null;
 const buffers = new Map();
@@ -120,7 +126,7 @@ function chestButton(ch) {
     : ch.chestState === 'queued' ? 'Na fila: o app pega um baú de cada vez'
     : ch.chestState === 'retry' ? failure + ' O app tentará novamente; clique para conferir na Twitch.'
     : 'Baú de bônus: o app vai pegar sozinho em instantes. Clique para abrir o chat e pegar agora.';
-  c.onclick = (e) => { e.stopPropagation(); window.tt.openStore(ch.slug); };
+  c.onclick = (e) => { e.stopPropagation(); api.openStore(ch.slug); };
   return c;
 }
 
@@ -195,7 +201,7 @@ function renderTabs() {
     add.replaceWith(input);
     input.focus();
     const done = async (commit) => {
-      if (commit && input.value.trim()) { state = await window.tt.addChannel(input.value); select(state.channels[state.channels.length - 1].slug); }
+      if (commit && input.value.trim()) { if (!applyState(await api.addChannel(input.value))) return; select(state.channels[state.channels.length - 1].slug); }
       renderTabs();
     };
     input.onkeydown = (e) => { if (e.key === 'Enter') done(true); if (e.key === 'Escape') done(false); };
@@ -268,13 +274,13 @@ function renderHeader() {
   if (ch.ageGate) {
     const warn = el('button', 'age-gate', '⚠ Conteúdo adulto: clique para confirmar');
     warn.title = 'A Twitch pede confirmação antes de tocar esta live. Sem isso, ela não conta pontos.';
-    warn.onclick = () => window.tt.showChannel(ch.slug);
+    warn.onclick = () => api.showChannel(ch.slug);
     title.prepend(warn, ' ');
   }
   if (ch.chest) {
     const c = el('button', 'chest-btn', '🎁 Pegar baú');
     c.title = 'Abre o chat da Twitch: clique no baú ao lado do saldo para ganhar os pontos extras';
-    c.onclick = () => window.tt.openStore(ch.slug);
+    c.onclick = () => api.openStore(ch.slug);
     title.prepend(c, ' ');
   }
   $('#input').placeholder = !state.loggedIn ? 'Faça login para mandar mensagens' : `Enviar mensagem em ${ch.displayName}…`;
@@ -385,8 +391,8 @@ function renderWelcome() {
   if (state.loggedIn || state.sessionChecking || card.childElementCount) return;
   card.append(el('div', 'wc-icon', '💜'), el('h3', null, 'Entre com a sua conta da Twitch'),
     el('p', null, 'O Twitchterino deixa as lives do PokeIdle tocando em segundo plano, pega o baú de +50 por você, mostra o saldo de cada canal com o preço real dos bônus e avisa quando dá para comprar.'),
-    button('Entrar com a Twitch', 'primary', () => window.tt.showLogin()),
-    el('small', null, 'Uma conta por vez. O login fica só neste PC e você pode sair quando quiser.'));
+    button('Entrar com a Twitch', 'primary', () => api.showLogin()),
+    el('small', null, 'Selecione uma das quatro contas acima. Cada login fica separado e salvo somente neste PC.'));
 }
 
 // Lista de "Bônus": automático ou um pacote (tipo + horas) com o preço mais comum nas lojas.
@@ -421,10 +427,55 @@ function renderTargetSelect() {
     : 'Automático: todos os canais chegam ao XP, depois Capture Boost e Secret Lure. Ou escolha um pacote (tipo + horas) para juntar até o preço dele.';
 }
 
+function renderAccounts() {
+  const nav = $('#accounts');
+  const accounts = state.accounts || Array.from({length: 4}, (_, index) => ({id: `account-${index + 1}`, label: `Conta ${index + 1}`}));
+  for (const account of accounts) {
+    let button = nav.querySelector(`[data-account-id="${account.id}"]`);
+    if (!button) {
+      button = el('button', 'account-tab'); button.type = 'button';
+      button.dataset.accountId = account.id;
+      button.onclick = () => selectAccount(account.id);
+      nav.append(button);
+    }
+    const selected = account.id === accountView.accountId;
+    button.classList.toggle('active', selected);
+    button.setAttribute('aria-pressed', String(selected));
+    const detail = account.sessionChecking ? 'Verificando sessão…' : !account.loggedIn ? 'Conectar Twitch'
+      : !account.farming ? 'Coleta pausada' : `${account.watching} lives · +${fmt(account.today || 0)} pts hoje`;
+    button.replaceChildren(el('b', null, account.username || account.label), el('small', null, detail));
+    button.title = `${account.label}${account.username ? ': ' + account.username : ''} — ${detail}`;
+  }
+}
+
+async function selectAccount(id) {
+  const previous = accountView.accountId;
+  if (id === previous) return true;
+  const ticket = accountView.select(id);
+  // Dismiss the old account's UI without issuing commands against the new account.
+  $('#modal').hidden = true; modalKind = null;
+  buffers.clear(); unread.clear(); sleepPicked.clear(); active = null;
+  $('#messages').replaceChildren(); $('#input').value = ''; $('#toasts').replaceChildren();
+  state = { channels: [], accounts: state.accounts, farming: false, accountId: id };
+  renderAccounts(); renderTabs(); renderHeader(); renderPanel();
+  try {
+    const next = await api.selectAccount(id);
+    return accountView.isCurrent(ticket) && applyState(next);
+  } catch {
+    if (!accountView.isCurrent(ticket)) return false;
+    accountView.select(previous);
+    applyState(await api.selectAccount(previous));
+    toast('Não foi possível trocar a conta. Tente novamente.');
+    return false;
+  }
+}
+
 function applyState(s) {
+  if (!accountView.accept(s)) return false;
   const prevLive = new Map(state.channels.map((c) => [c.slug, c.live]));
   celebrate(state, s);
   state = s;
+  renderAccounts();
   for (const ch of state.channels) {
     const was = prevLive.get(ch.slug);
     if (was === false && ch.live) pushMessage(ch.slug, systemMessage(`${ch.displayName} entrou ao vivo.`));
@@ -461,6 +512,7 @@ function applyState(s) {
   renderTabs();
   renderHeader();
   renderPanel();
+  return true;
 }
 
 // ---------- Bônus ativos e previsão ----------
@@ -483,7 +535,7 @@ function renderBonusBox() {
     chip.append(el('span', 'bonus-name', shortName(b.name)), el('span', 'bonus-left', on ? clock(b.endsAt - now) : 'inativo'));
     const add = el('button', 'bonus-add', '+1h');
     add.title = `Registrar uma compra de ${b.name} feita fora do app (as compras feitas no app entram sozinhas)`;
-    add.onclick = async () => applyState(await window.tt.addPurchase(b.kind));
+    add.onclick = async () => applyState(await api.addPurchase(b.kind));
     chip.append(add);
     box.append(chip);
   }
@@ -495,7 +547,7 @@ function renderBonusBox() {
       const row = el('div', 'purchase', `${shortName(BONUS_NAMES[p.kind] || 'bônus')} ${p.hours || 1}h · ${ch ? ch.displayName : 'registrado à mão'} · ${timeStr(new Date(p.t))}`);
       const x = el('button', 'purchase-x', '✕');
       x.title = 'Não foi uma compra de bônus? Remove do cronômetro e do relatório';
-      x.onclick = async () => applyState(await window.tt.removePurchase(p.t));
+      x.onclick = async () => applyState(await api.removePurchase(p.t));
       row.append(x);
       list.append(row);
     }
@@ -513,7 +565,7 @@ function openModal(kind, ...nodes) {
   $('#modal').hidden = false;
 }
 function closeModal() {
-  if (modalKind === 'intro') window.tt.introDone().then(applyState);
+  if (modalKind === 'intro') api.introDone().then(applyState);
   modalKind = null;
   $('#modal').hidden = true;
 }
@@ -536,7 +588,7 @@ function renderSleepList() {
   const seq = state.storeSequence;
   if (seq) {
     wrap.append(el('p', null, `Loja ${seq.done} de ${seq.total} aberta. Compre o bônus e feche a janela da loja: a próxima abre sozinha.`),
-      button('Parar sequência', null, async () => applyState(await window.tt.cancelStoreSequence())));
+      button('Parar sequência', null, async () => applyState(await api.cancelStoreSequence())));
     return $('#modal-card').replaceChildren(wrap);
   }
   if (!rich.length) {
@@ -555,7 +607,7 @@ function renderSleepList() {
   }
   wrap.append(list);
   const go = button(`Abrir ${sleepPicked.size} loja${sleepPicked.size === 1 ? '' : 's'} em sequência`, 'primary', async () => {
-    applyState(await window.tt.openStoreSequence(state.channels.filter((c) => sleepPicked.has(c.slug)).map((c) => c.slug)));
+    applyState(await api.openStoreSequence(state.channels.filter((c) => sleepPicked.has(c.slug)).map((c) => c.slug)));
   });
   go.disabled = !sleepPicked.size;
   const all = button('Marcar todos', null, () => { for (const c of rich) sleepPicked.add(c.slug); renderSleepList(); });
@@ -566,7 +618,8 @@ function renderSleepList() {
 }
 
 async function showReport() {
-  const r = await window.tt.getReport();
+  const r = await api.getReport();
+  if (!r) return;
   const card = el('div', 'report');
   const head = el('div', 'report-head');
   head.append(el('span', 'brand', 'T'), el('b', null, ' Twitchterino · minha semana'), el('span', 'report-date', new Date().toLocaleDateString('pt-BR')));
@@ -600,7 +653,7 @@ async function showReport() {
   const actions = el('div', 'modal-actions');
   actions.append(button('💾 Salvar imagem', 'primary', async () => {
     const rect = card.getBoundingClientRect();
-    const file = await window.tt.saveReport({ x: rect.x, y: rect.y, width: rect.width, height: rect.height });
+    const file = await api.saveReport({ x: rect.x, y: rect.y, width: rect.width, height: rect.height });
     if (file) actions.replaceChildren(el('span', 'saved', `Imagem salva em ${file}`), button('Fechar', null, closeModal));
   }), button('Fechar', null, closeModal));
   openModal('report', card, actions);
@@ -611,7 +664,7 @@ function showIntro(kind) {
   if (kind === 'welcome') {
     wrap.append(el('h3', null, 'Bem-vindo ao Twitchterino 👋'));
     const steps = [
-      ['1. Faça login', 'Clique em Login Twitch e entre com a sua conta. O app usa uma conta por vez.'],
+      ['1. Faça login', 'Selecione Conta 1 a Conta 4 e entre com uma conta diferente em cada uma. As outras continuam coletando em segundo plano.'],
       ['2. Escolha seu bônus', 'Em Bônus, deixe Automático ou escolha XP, Capture Boost ou Secret Lure. O preço é lido da loja de cada canal.'],
       ['3. Acompanhe no painel', 'Em Pontos ▸ você vê o saldo de cada canal, a previsão do próximo bônus e quanto tempo falta no seu bônus ativo.'],
       ['4. Compre na loja', 'O ícone de pontos ao lado do chat abre a loja do canal. A compra é sempre feita por você. O baú de +50 o app pega sozinho (dá para desligar em ⚙).'],
@@ -639,9 +692,17 @@ function chatAlert(slug, data, flags) {
     if (Date.now() - (lastGiveawayAlert.get(slug) || 0) < 5 * 60 * 1000) return;
     lastGiveawayAlert.set(slug, Date.now());
   }
-  const n = new Notification(flags.mention ? `${data.sender.username} mencionou você em ${name}` : `🎉 Sorteio no chat de ${name}`,
+  const ownerAccountId = accountView.accountId;
+  const accountName = state.username || ownerAccountId;
+  const title = flags.mention ? `${data.sender.username} mencionou você em ${name}` : `🎉 Sorteio no chat de ${name}`;
+  const n = new Notification(`${accountName} · ${title}`,
     { body: String(data.content || '').replace(/\[emote:[^:]+:([^\]]*)\]/g, '$1').slice(0, 140), icon: '../build/icon.png' });
-  n.onclick = () => { window.focus(); select(slug); };
+  n.onclick = async () => {
+    window.focus();
+    const activation = selectAccount(ownerAccountId);
+    const ticket = accountView.current();
+    if (await activation && accountView.isCurrent(ticket) && state.channels.some(c => c.slug === slug)) select(slug);
+  };
 }
 
 // ---------- Comemorações ----------
@@ -697,26 +758,26 @@ function celebrate(prev, next) {
 }
 
 // ---------- Eventos ----------
-$('#btn-login').onclick = () => window.tt.showLogin();
-$('#btn-logout').onclick = async () => applyState(await window.tt.logout());
-$('#btn-refresh').onclick = async () => applyState(await window.tt.refresh());
-$('#farming').onchange = async (e) => applyState(await window.tt.setFarming(e.target.checked));
-$('#watch-all').onchange = async (e) => applyState(await window.tt.setWatchAll(e.target.checked));
-$('#btn-limit').onclick = async () => applyState(await (state.limitTest ? window.tt.stopLimitTest() : window.tt.startLimitTest()));
-$('#autostart').onchange = async (e) => applyState(await window.tt.setAutostart(e.target.checked));
-$('#btn-quit').onclick = () => window.tt.quit();
-$('#notify-chest').onchange = async (e) => applyState(await window.tt.setNotifyChest(e.target.checked));
-$('#auto-chest').onchange = async (e) => applyState(await window.tt.setAutoChest(e.target.checked));
-$('#notify-chat').onchange = async (e) => applyState(await window.tt.setNotifyChat(e.target.checked));
-$('#sleep-mode').onchange = async (e) => applyState(await window.tt.setSleepMode(e.target.checked));
+$('#btn-login').onclick = () => api.showLogin();
+$('#btn-logout').onclick = async () => applyState(await api.logout());
+$('#btn-refresh').onclick = async () => applyState(await api.refresh());
+$('#farming').onchange = async (e) => applyState(await api.setFarming(e.target.checked));
+$('#watch-all').onchange = async (e) => applyState(await api.setWatchAll(e.target.checked));
+$('#btn-limit').onclick = async () => applyState(await (state.limitTest ? api.stopLimitTest() : api.startLimitTest()));
+$('#autostart').onchange = async (e) => applyState(await api.setAutostart(e.target.checked));
+$('#btn-quit').onclick = () => api.quit();
+$('#notify-chest').onchange = async (e) => applyState(await api.setNotifyChest(e.target.checked));
+$('#auto-chest').onchange = async (e) => applyState(await api.setAutoChest(e.target.checked));
+$('#notify-chat').onchange = async (e) => applyState(await api.setNotifyChat(e.target.checked));
+$('#sleep-mode').onchange = async (e) => applyState(await api.setSleepMode(e.target.checked));
 $('#btn-sleep').onclick = () => { openModal('sleep'); renderSleepList(); };
 $('#btn-report').onclick = showReport;
-$('#btn-fav').onclick = async () => active && applyState(await window.tt.toggleFavorite(active));
-$('#notify-bonus').onchange = async (e) => applyState(await window.tt.setNotifyBonus(e.target.checked));
-$('#rotation').onchange = async (e) => applyState(await window.tt.setRotation(e.target.checked));
-$('#bonus-target').onchange = async (e) => applyState(await window.tt.setBonusTarget(e.target.value));
-$('#low-quality').onchange = async (e) => applyState(await window.tt.setLowQuality(e.target.checked));
-$('#max-watchers').onchange = async (e) => applyState(await window.tt.setMaxWatchers(e.target.value));
+$('#btn-fav').onclick = async () => active && applyState(await api.toggleFavorite(active));
+$('#notify-bonus').onchange = async (e) => applyState(await api.setNotifyBonus(e.target.checked));
+$('#rotation').onchange = async (e) => applyState(await api.setRotation(e.target.checked));
+$('#bonus-target').onchange = async (e) => applyState(await api.setBonusTarget(e.target.value));
+$('#low-quality').onchange = async (e) => applyState(await api.setLowQuality(e.target.checked));
+$('#max-watchers').onchange = async (e) => applyState(await api.setMaxWatchers(e.target.value));
 const setPanel = (open) => {
   $('#panel').hidden = !open;
   $('#btn-panel').textContent = open ? 'Bônus ◂' : 'Bônus ▸';
@@ -739,14 +800,14 @@ document.addEventListener('keydown', (e) => {
     if (next) { e.preventDefault(); select(next); }
   }
 });
-$('#btn-points').onclick = () => active && window.tt.openStore(active);
-$('#btn-show').onclick = () => active && window.tt.showChannel(active);
+$('#btn-points').onclick = () => active && api.openStore(active);
+$('#btn-show').onclick = () => active && api.showChannel(active);
 $('#btn-remove').onclick = async () => {
   if (!active) return;
   const slug = active;
   buffers.delete(slug);
   active = null;
-  applyState(await window.tt.removeChannel(slug));
+  applyState(await api.removeChannel(slug));
   if (state.channels.length) select(state.channels[0].slug); else $('#messages').replaceChildren();
 };
 $('#composer').onsubmit = async (e) => {
@@ -756,17 +817,20 @@ $('#composer').onsubmit = async (e) => {
   const text = input.value.trim();
   if (!ch || !text) return;
   input.value = '';
-  const res = await window.tt.sendChat(ch.slug, text);
+  const res = await api.sendChat(ch.slug, text);
+  if (!res) return;
   if (!res.ok) pushMessage(ch.slug, systemMessage(`Falha ao enviar (${res.message || 'erro'}).`));
 };
 
-window.tt.onStatus(applyState);
-window.tt.onSelect((slug) => select(slug));
-window.tt.onToast((text) => toast(text, 'gold'));
-window.tt.onChat(({ slug, kind, data }) => {
+api.onAccountSelect(selectAccount);
+api.onStatus(applyState);
+api.onSelect((slug, accountId) => { if (accountId === accountView.accountId) select(slug); });
+api.onToast((text, accountId) => { if (accountId === accountView.accountId) toast(text, 'gold'); });
+api.onChat(({ slug, kind, data }, accountId) => {
+  if (accountId !== accountView.accountId) return;
   if (kind !== 'message') return;
   const flags = chatFlags(data);
   pushMessage(slug, renderChat(data, flags));
   if (flags.mention || flags.giveaway) chatAlert(slug, data, flags);
 });
-window.tt.getState().then((s) => { applyState(s); if (active) select(active); });
+api.getState().then((s) => { applyState(s); if (active) select(active); });

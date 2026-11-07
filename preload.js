@@ -2,42 +2,66 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 const uiArgument = process.argv.find((arg) => arg.startsWith('--app-ui-url='));
 if (process.isMainFrame && uiArgument && location.href === uiArgument.slice('--app-ui-url='.length)) {
+  let selectedAccountId = 'account-1';
+  let selectionInitialized = false;
+  const accountInvoke = async (command, ...args) => {
+    const accountId = selectedAccountId;
+    const reply = await ipcRenderer.invoke('account:command', { accountId, command, args });
+    return reply.result && typeof reply.result === 'object' ? { ...reply.result, accountId: reply.accountId } : reply.result;
+  };
+  const accountEvent = (channel, callback) => ipcRenderer.on(channel, (_event, message) => {
+    if (message.accountId === selectedAccountId) callback(message.payload, message.accountId);
+  });
   contextBridge.exposeInMainWorld('tt', {
-    getState: () => ipcRenderer.invoke('state:get'),
-    addChannel: (slug) => ipcRenderer.invoke('channels:add', slug),
-    removeChannel: (slug) => ipcRenderer.invoke('channels:remove', slug),
-    setFarming: (on) => ipcRenderer.invoke('farming:set', on),
-    setWatchAll: (on) => ipcRenderer.invoke('watchAll:set', on),
-    setMaxWatchers: (n) => ipcRenderer.invoke('maxWatchers:set', n),
-    setRotation: (on) => ipcRenderer.invoke('rotation:set', on),
-    setBonusTarget: (kind) => ipcRenderer.invoke('bonusTarget:set', kind),
+    selectAccount: (id) => {
+      if (!/^account-[1-4]$/.test(id)) return Promise.reject(new Error('Invalid account'));
+      selectionInitialized = true;
+      selectedAccountId = id;
+      return ipcRenderer.invoke('account:select', id);
+    },
+    onAccountSelect: (callback) => ipcRenderer.on('account:activate', (_event, id) => callback(id)),
+    getState: async () => {
+      const state = await ipcRenderer.invoke('state:get');
+      if (!selectionInitialized && /^account-[1-4]$/.test(state.accountId)) {
+        selectedAccountId = state.accountId;
+        selectionInitialized = true;
+      }
+      return state;
+    },
+    addChannel: (slug) => accountInvoke('channels:add', slug),
+    removeChannel: (slug) => accountInvoke('channels:remove', slug),
+    setFarming: (on) => accountInvoke('farming:set', on),
+    setWatchAll: (on) => accountInvoke('watchAll:set', on),
+    setMaxWatchers: (n) => accountInvoke('maxWatchers:set', n),
+    setRotation: (on) => accountInvoke('rotation:set', on),
+    setBonusTarget: (kind) => accountInvoke('bonusTarget:set', kind),
     setAutostart: (on) => ipcRenderer.invoke('autostart:set', on),
     quit: () => ipcRenderer.invoke('app:quit'),
-    setNotifyBonus: (on) => ipcRenderer.invoke('notifyBonus:set', on),
-    setNotifyChest: (on) => ipcRenderer.invoke('notifyChest:set', on),
-    setAutoChest: (on) => ipcRenderer.invoke('autoChest:set', on),
-    onToast: (cb) => ipcRenderer.on('toast', (_e, t) => cb(t)),
-    startLimitTest: () => ipcRenderer.invoke('limitTest:start'),
-    stopLimitTest: () => ipcRenderer.invoke('limitTest:stop'),
-    setLowQuality: (on) => ipcRenderer.invoke('lowQuality:set', on),
-    refresh: () => ipcRenderer.invoke('refresh'),
-    openStore: (slug) => ipcRenderer.invoke('store:open', slug),
-    showLogin: () => ipcRenderer.invoke('login:show'),
-    logout: () => ipcRenderer.invoke('logout'),
-    showChannel: (slug) => ipcRenderer.invoke('channel:show', slug),
-    sendChat: (chatroomId, content) => ipcRenderer.invoke('chat:send', { chatroomId, content }),
-    setNotifyChat: (on) => ipcRenderer.invoke('notifyChat:set', on),
-    setSleepMode: (on) => ipcRenderer.invoke('sleepMode:set', on),
-    toggleFavorite: (slug) => ipcRenderer.invoke('favorite:toggle', slug),
-    addPurchase: (kind) => ipcRenderer.invoke('purchase:add', kind),
-    removePurchase: (t) => ipcRenderer.invoke('purchase:remove', t),
-    openStoreSequence: (slugs) => ipcRenderer.invoke('stores:sequence', slugs),
-    cancelStoreSequence: () => ipcRenderer.invoke('stores:cancel'),
-    getReport: () => ipcRenderer.invoke('report:get'),
-    saveReport: (rect) => ipcRenderer.invoke('report:save', rect),
-    introDone: () => ipcRenderer.invoke('intro:done'),
-    onSelect: (cb) => ipcRenderer.on('select', (_e, slug) => cb(slug)),
-    onStatus: (cb) => ipcRenderer.on('status', (_e, s) => cb(s)),
-    onChat: (cb) => ipcRenderer.on('chat', (_e, m) => cb(m)),
+    setNotifyBonus: (on) => accountInvoke('notifyBonus:set', on),
+    setNotifyChest: (on) => accountInvoke('notifyChest:set', on),
+    setAutoChest: (on) => accountInvoke('autoChest:set', on),
+    onToast: (cb) => accountEvent('toast', cb),
+    startLimitTest: () => accountInvoke('limitTest:start'),
+    stopLimitTest: () => accountInvoke('limitTest:stop'),
+    setLowQuality: (on) => accountInvoke('lowQuality:set', on),
+    refresh: () => accountInvoke('refresh'),
+    openStore: (slug) => accountInvoke('store:open', slug),
+    showLogin: () => accountInvoke('login:show'),
+    logout: () => accountInvoke('logout'),
+    showChannel: (slug) => accountInvoke('channel:show', slug),
+    sendChat: (chatroomId, content) => accountInvoke('chat:send', { chatroomId, content }),
+    setNotifyChat: (on) => accountInvoke('notifyChat:set', on),
+    setSleepMode: (on) => accountInvoke('sleepMode:set', on),
+    toggleFavorite: (slug) => accountInvoke('favorite:toggle', slug),
+    addPurchase: (kind) => accountInvoke('purchase:add', kind),
+    removePurchase: (t) => accountInvoke('purchase:remove', t),
+    openStoreSequence: (slugs) => accountInvoke('stores:sequence', slugs),
+    cancelStoreSequence: () => accountInvoke('stores:cancel'),
+    getReport: () => accountInvoke('report:get'),
+    saveReport: (rect) => accountInvoke('report:save', rect),
+    introDone: () => accountInvoke('intro:done'),
+    onSelect: (cb) => accountEvent('select', cb),
+    onStatus: (cb) => ipcRenderer.on('status', (_e, s) => { if (s.accountId === selectedAccountId) cb(s); }),
+    onChat: (cb) => accountEvent('chat', cb),
   });
 }
