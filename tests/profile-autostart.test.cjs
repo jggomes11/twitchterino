@@ -1,10 +1,11 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const path = require('node:path');
 const { loadApp } = require('./helpers/app.cjs');
 
 test('Windows autostart resumes the selected account without the launcher environment', async () => {
-  const profile = '/fake/Users/Conta One/Twitchterino-Profiles/Conta-1';
+  const profile = path.resolve('/fake/Users/Conta One/Twitchterino-Profiles/Conta-1');
   const app = loadApp({ env: { TWITCHTERINO_DATA: profile } });
   assert.equal((await app.handlers.get('autostart:set')(app.event(), true)).openAtLogin, true);
   const item = app.state.loginItems.at(-1);
