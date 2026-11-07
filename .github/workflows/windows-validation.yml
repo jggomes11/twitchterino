@@ -235,13 +235,12 @@ jobs:
           "$PreviewDigest  Twitchterino-0.1.3-rc.2-Windows-x64-4-contas.zip" | Set-Content -Encoding ascii SHA256SUMS-rc.2.txt
       - name: Prepare the explicitly labelled prerelease draft
         run: |
-          gh release create v0.1.3-rc.2 --repo jggomes11/twitchterino --target 7c072b78f1cfc14ee930bfed194a459fd5ea31a6 --title 'Twitchterino 0.1.3-rc.2 — teste de quatro contas' --notes-file preview-output/NOTAS.md --draft --prerelease
-          if ($LASTEXITCODE -ne 0) { throw 'Could not create a new preview draft; existing releases are not overwritten' }
           $PreviewRelease = gh api repos/jggomes11/twitchterino/releases/tags/v0.1.3-rc.2 | ConvertFrom-Json
-          if (!$PreviewRelease.draft -or !$PreviewRelease.prerelease -or $PreviewRelease.target_commitish -ne '7c072b78f1cfc14ee930bfed194a459fd5ea31a6') { throw 'Unexpected preview identity' }
-          gh release upload v0.1.3-rc.2 Twitchterino-0.1.3-rc.2-Windows-x64-4-contas.zip SHA256SUMS-rc.2.txt --repo jggomes11/twitchterino
+          if (!$PreviewRelease.draft -or !$PreviewRelease.prerelease -or $PreviewRelease.tag_name -ne 'v0.1.3-rc.2' -or $PreviewRelease.target_commitish -ne '7c072b78f1cfc14ee930bfed194a459fd5ea31a6') { throw 'Unexpected preview identity' }
+          gh release upload v0.1.3-rc.2 Twitchterino-0.1.3-rc.2-Windows-x64-4-contas.zip SHA256SUMS-rc.2.txt --repo jggomes11/twitchterino --clobber
           if ($LASTEXITCODE -ne 0) { throw 'Preview upload failed; keeping the release as draft' }
       - name: Preserve the candidate for independent verification before publication
+        if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: four-account-preview-7c072b78f1cfc14ee930bfed194a459fd5ea31a6
