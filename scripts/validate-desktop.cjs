@@ -25,6 +25,12 @@ fs.mkdirSync(output, { recursive: true });
 const defaults = require('./validation-config.cjs')(root, pkg.version, { watchAll: false });
 const channels = defaults.channels;
 fs.writeFileSync(path.join(profile, 'config.json'), JSON.stringify(defaults));
+// The anonymous-player fixture must start all other slots paused as well.
+for (let index = 2; index <= 4; index++) {
+  const directory = path.join(profile, 'accounts', 'account-' + index);
+  fs.mkdirSync(directory, {recursive: true});
+  fs.writeFileSync(path.join(directory, 'config.json'), JSON.stringify(defaults));
+}
 
 const report = {
   product: pkg.productName, os: process.platform, osRelease: os.release(),
@@ -158,8 +164,8 @@ async function freePort() {
     const state = await evaluate(main, 'window.' + namespace + '.getState()');
     assert.equal(state.loggedIn, false, 'CI profile must remain unauthenticated');
     assert.equal(state.farming, false);
-    assert.equal(state.maxWatchers, 1);
-    assert.equal(state.rotation, false);
+    assert.equal(state.maxWatchers, 2);
+    assert.equal(state.rotation, true);
     assert.equal(state.watchAll, false);
     assert.equal(state.channels.length, channels.length);
     assert.equal(await evaluate(main, 'document.title'), pkg.productName);
@@ -205,9 +211,9 @@ async function freePort() {
     await evaluate(main, 'document.querySelector("#notify-bonus").click()');
     await until(async () => (await evaluate(main, 'window.' + namespace + '.getState()')).notifyBonus === true, 'UI checkbox IPC');
     await evaluate(main, 'document.querySelector("#notify-bonus").click()');
-    await evaluate(main, '(() => {const input=document.querySelector("#max-watchers");input.value="2";input.dispatchEvent(new Event("change",{bubbles:true}));})()');
-    await until(async () => (await evaluate(main, 'window.' + namespace + '.getState()')).maxWatchers === 2, 'numeric UI IPC');
     await evaluate(main, '(() => {const input=document.querySelector("#max-watchers");input.value="1";input.dispatchEvent(new Event("change",{bubbles:true}));})()');
+    await until(async () => (await evaluate(main, 'window.' + namespace + '.getState()')).maxWatchers === 1, 'numeric UI IPC');
+    await evaluate(main, '(() => {const input=document.querySelector("#max-watchers");input.value="2";input.dispatchEvent(new Event("change",{bubbles:true}));})()');
     report.checks.push('checkbox changed through the real UI', 'numeric input string accepted through the real UI');
     await screenshot(main, 'settings.png');
     if (namespace === 'tt') {

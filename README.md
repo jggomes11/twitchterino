@@ -2,7 +2,7 @@
 
 Independent security-maintenance fork of [ViinniSantoos/twitchterino](https://github.com/ViinniSantoos/twitchterino), originally created by VinniiSaantos. The original MIT license, copyright and Git history are preserved.
 
-Twitchterino is an Electron client for Twitch chat and PokeIdle channel-point tracking. It retains the existing interface, channel rewards, background video playback, bonus-chest collection, notifications and one-account session model.
+Twitchterino is an Electron client for Twitch chat and PokeIdle channel-point tracking. It retains the existing interface, channel rewards, background video playback, bonus-chest collection, notifications and four isolated Twitch accounts in one application window.
 
 ## Security-maintenance changes
 
@@ -51,13 +51,15 @@ The packaging configuration includes the main-process security modules. Tests ex
 
 Windows x64 builds are published manually in this fork's [releases](https://github.com/jggomes11/twitchterino/releases). Executables are unsigned, and automatic updates remain disabled. Downloads from the original author's project do not contain the fork's changes.
 
-The installer keeps the existing application ID and replaces an installation with that identity rather than installing alongside it. The visible name and default profile remain compatible. For four separate accounts, extract the entire `4-contas.zip` release asset and use `Abrir-Conta-1.cmd` through `Abrir-Conta-4.cmd`. Each launcher uses its own persistent profile under `%LOCALAPPDATA%\Twitchterino-Profiles\Conta-N`; reopening the same launcher focuses that profile's existing instance. These profiles are separate from the default app and earlier validation profiles; sign in separately in each official Twitch window. Updates keep the four profile paths stable. Do not share profile directories between processes or commit cookies, tokens, browser profiles or personal session data.
+The installer keeps the existing application ID. In the default installation, slot1 retains the original profile's login/configuration; slots2–4 start independently. For the portable ZIP, extract the entire `4-contas.zip` asset and open **Abrir-Twitchterino.cmd** once. It uses a stable separate data root `%LOCALAPPDATA%\Twitchterino-Accounts`. Select **Conta 1** through **Conta 4** inside that window and sign in to a different Twitch account in each official login window. Selecting another account leaves the other collectors running. Each slot has independent cookies, channels, settings, players, chests and reports.
 
-In each account window, leave **Todas as lives online** off, set **Limite de lives** to **2**, and enable **Foco em bônus**, **Juntar pontos** and **Pegar baú sozinho**. Each account keeps its own channel list, balances and reports. These settings are the default for fresh profiles; updating the application preserves existing profile settings.
+Fresh slots use **Todas as lives online** off, **Limite de lives: 2**, **Foco em bônus**, **Juntar pontos** and **Pegar baú sozinho** on. Existing settings are preserved. Twitch decides whether points are credited. Use one active app per Twitch account when checking points, including older versions.
+
+The previous RC2 four-process shortcuts are superseded by this architecture. Their profiles and validation profiles are not imported; sign in again in the new portable app. Global **Iniciar com o Windows** starts this one app with all its saved account slots. Quit through **Sair** in the tray before replacing application files. Do not commit or upload profile directories, cookies or tokens.
 
 The partner list remains public configuration fetched from the original author's GitHub Pages URL with the existing slug validation. It is separate from application updates.
 
-The user has confirmed real Windows login, point accrual and automatic bonus collection in the maintained build. Automated release validation additionally checks four simultaneous empty portable profiles and the same-profile instance lock; it does not prove point awards for four authenticated accounts.
+The user confirmed real Windows login, point accrual and automatic bonus collection in the maintained single-account base. The new automated fixture uses four empty partitions and fake persistent cookies in one application; it does not authenticate four real accounts or prove their point awards. See the release/PR validation notes for actual outcomes. RC2 was not accepted for four accounts after the user's corrected window-replacement report.
 
 ## Attribution
 

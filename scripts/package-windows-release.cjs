@@ -18,30 +18,29 @@ for (const name of ['Twitchterino-Setup.exe']) {
 fs.cpSync(path.join(root, 'dist', 'win-unpacked'), path.join(output, 'portable', 'app'), { recursive: true });
 assert(fs.existsSync(path.join(output, 'portable', 'app', 'Twitchterino.exe')), 'Missing portable application');
 fs.copyFileSync(path.join(root, 'LICENSE'), path.join(output, 'portable', 'LICENSE.txt'));
-for (let profile = 1; profile <= 4; profile++) {
-  const launcher = [
-    '@echo off', 'setlocal',
-    'set "ELECTRON_NO_ATTACH_CONSOLE=1"',
-    `set "TWITCHTERINO_DATA=%LOCALAPPDATA%\\Twitchterino-Profiles\\Conta-${profile}"`,
-    'start "" "%~dp0app\\Twitchterino.exe"', 'endlocal', '',
-  ].join('\r\n');
-  fs.writeFileSync(path.join(output, 'portable', `Abrir-Conta-${profile}.cmd`), launcher, 'ascii');
-}
+const launcher = [
+  '@echo off', 'setlocal',
+  'set "ELECTRON_NO_ATTACH_CONSOLE=1"',
+  'set "TWITCHTERINO_DATA=%LOCALAPPDATA%\\Twitchterino-Accounts"',
+  'start "" "%~dp0app\\Twitchterino.exe"', 'endlocal', '',
+].join('\r\n');
+fs.writeFileSync(path.join(output, 'portable', 'Abrir-Twitchterino.cmd'), launcher, 'ascii');
 const instructions = [
-  `Twitchterino ${pkg.version} - quatro contas no Windows x64`, '',
-  'Extraia TODO o ZIP. Abra Abrir-Conta-1.cmd, Abrir-Conta-2.cmd,',
-  'Abrir-Conta-3.cmd e Abrir-Conta-4.cmd. Faca login em uma conta diferente em cada janela.',
-  'Cada atalho usa uma pasta independente em %LOCALAPPDATA%\\Twitchterino-Profiles\\Conta-N.',
-  'Use sempre o mesmo atalho para a mesma conta, inclusive depois de atualizar o pacote.',
-  'Reabrir o mesmo atalho deve trazer a instancia existente, sem criar outra no mesmo perfil.',
-  'Em cada perfil: Todas as lives online desligado, Limite de lives 2 e Foco em bonus ligado.',
-  'Ative Juntar pontos e Pegar bau sozinho em cada perfil.',
-  'Os quatro perfis aumentam o consumo de memoria, CPU e rede. A Twitch decide a elegibilidade dos pontos.',
-  'Feche pelo menu Sair da bandeja antes de substituir os arquivos do pacote.',
-  'Os perfis de validacao anteriores nao sao copiados: entre novamente em cada conta.',
-  'Abrir app\\Twitchterino.exe diretamente usa o perfil padrao, separado dos quatro atalhos.',
+  `Twitchterino ${pkg.version} - quatro contas na mesma janela - Windows x64`, '',
+  'Extraia TODO o ZIP e abra Abrir-Twitchterino.cmd uma vez.',
+  'Selecione Conta 1, Conta 2, Conta 3 e Conta 4 na mesma janela.',
+  'Faca login em uma conta diferente da Twitch em cada uma, somente na pagina oficial.',
+  'Trocar a conta exibida mantem as outras coletando em segundo plano.',
+  'Cada conta guarda sessao, canais, configuracoes e relatorios separados.',
+  'Novas contas usam duas lives, Foco em bonus e Pegar bau sozinho ligados.',
+  'A Twitch decide a elegibilidade dos pontos. Abrir mais lives nao aumenta o limite.',
+  'Os dados deste pacote ficam em %LOCALAPPDATA%\\Twitchterino-Accounts.',
+  'Perfis dos pacotes RC2/validacao nao sao importados: entre novamente nas contas.',
+  'Use o mesmo atalho nas atualizacoes. Reabri-lo mostra a janela existente.',
+  'Antes de substituir arquivos, feche o app pelo menu Sair da bandeja.',
+  'Para testar pontos, mantenha apenas uma instancia por conta, incluindo versoes anteriores.',
+  'O instalador mantem a identidade original e usa o perfil padrao separado deste ZIP.',
   'Executaveis sem assinatura digital; atualizacoes automaticas desligadas.',
-  'Instalador e app original usam o mesmo identificador: o instalador nao cria uma instalacao lado a lado.',
   'Nao envie pastas de perfil, senhas, cookies ou tokens.', '',
   'Projeto original: https://github.com/ViinniSantoos/twitchterino (MIT)',
   'Fork: https://github.com/jggomes11/twitchterino', '',
@@ -50,6 +49,6 @@ fs.writeFileSync(path.join(output, 'portable', 'LEIA-ME.txt'), instructions, 'as
 const sourceSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
 fs.writeFileSync(path.join(output, 'release-build-info.json'), JSON.stringify({
   version: pkg.version, sourceSha, signed: false, platform: 'win32', arch: 'x64',
-  profileRoot: '%LOCALAPPDATA%\\Twitchterino-Profiles', profiles: 4, portableFormat: 'directory-zip',
+  profileRoot: '%LOCALAPPDATA%\\Twitchterino-Accounts', accounts: 4, applicationWindows: 1, portableFormat: 'directory-zip',
 }, null, 2) + '\n');
 console.log(`Prepared Windows release ${pkg.version} from ${sourceSha}`);
