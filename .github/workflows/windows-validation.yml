@@ -11,7 +11,7 @@ on:
         options: [windows-2025, windows-2022]
         default: windows-2025
       release:
-        description: Build Windows installer and portable release candidates
+        description: Build the Windows installer release candidate
         type: boolean
         default: false
       publish_release:
@@ -93,16 +93,14 @@ jobs:
       - name: Prepare Windows release candidates
         if: success() && env.BUILD_RELEASE == 'true'
         run: node scripts/package-windows-release.cjs
-      - name: Validate four accounts in the actual portable application
+      - name: Validate account isolation in the Windows build
         if: success() && env.BUILD_RELEASE == 'true'
         timeout-minutes: 5
         run: node scripts/validate-accounts.cjs
-      - name: Archive portable profiles and calculate release checksums
+      - name: Calculate installer checksum
         if: success() && env.BUILD_RELEASE == 'true'
         run: |
-          $ReleaseVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          Compress-Archive -Path release-output/portable/* -DestinationPath "release-output/Twitchterino-$ReleaseVersion-Windows-x64-4-contas.zip"
-          Get-ChildItem release-output -File | Where-Object { $_.Extension -in '.exe', '.zip' } | Sort-Object Name | ForEach-Object {
+          Get-ChildItem release-output -File | Where-Object { $_.Extension -eq '.exe' } | Sort-Object Name | ForEach-Object {
             $ReleaseHash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             "$ReleaseHash  $($_.Name)"
           } | Set-Content -Encoding ascii release-output/SHA256SUMS.txt
@@ -113,7 +111,6 @@ jobs:
           name: windows-release-${{ github.sha }}
           path: |
             release-output/*.exe
-            release-output/*.zip
             release-output/*.txt
             release-output/*.json
           retention-days: 7
@@ -156,8 +153,10 @@ jobs:
           version = package['version']
           assert re.fullmatch(r'\d+\.\d+\.\d+', version), 'Expected stable release version'
           assert info['sourceSha'] == os.environ['GITHUB_SHA'], 'Unexpected candidate source'
-          assert info['version'] == version and info['accounts'] == 4 and info['applicationWindows'] == 1 and info['portableFormat'] == 'directory-zip'
-          expected = {'Twitchterino-Setup.exe', f'Twitchterino-{version}-Windows-x64-4-contas.zip'}
+          assert info['version'] == version and info['accounts'] == 4 and info['applicationWindows'] == 1 and info['distribution'] == 'nsis-installer'
+          native = json.loads((root / 'account-validation.json').read_text())
+          assert native['passed'] is True and native['sourceSha'] == os.environ['GITHUB_SHA']
+          expected = {'Twitchterino-Setup.exe'}
           seen = set()
           for line in (root / 'SHA256SUMS.txt').read_text().splitlines():
               digest, name = line.split('  ', 1)
@@ -167,12 +166,12 @@ jobs:
           assert seen == expected, 'Missing release asset'
           with open(os.environ['GITHUB_ENV'], 'a') as env:
               env.write(f'RELEASE_VERSION={version}\nRELEASE_TAG=v{version}\n')
-          print('Verified installer, four-account ZIP and source identity.')
+          print('Verified installer and source identity.')
           PY
       - name: Create draft, upload verified assets and publish
         run: |
-          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Twitchterino $RELEASE_VERSION — quatro contas" --notes-file docs/releases/v0.1.3.pt-BR.md --draft
-          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" release-output/Twitchterino-Setup.exe "release-output/Twitchterino-$RELEASE_VERSION-Windows-x64-4-contas.zip" release-output/SHA256SUMS.txt release-output/release-build-info.json
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Twitchterino $RELEASE_VERSION — múltiplas contas" --notes-file docs/releases/v0.1.3.pt-BR.md --draft
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" release-output/Twitchterino-Setup.exe release-output/SHA256SUMS.txt release-output/release-build-info.json release-output/account-validation.json
           gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
 
   upload-preview:
@@ -197,10 +196,10 @@ jobs:
           root = pathlib.Path('release-output')
           info = json.loads((root / 'release-build-info.json').read_text())
           assert info['sourceSha'] == os.environ['GITHUB_SHA']
-          assert info['accounts'] == 4 and info['applicationWindows'] == 1 and info['portableFormat'] == 'directory-zip'
+          assert info['accounts'] == 4 and info['applicationWindows'] == 1 and info['distribution'] == 'nsis-installer'
           native = json.loads((root / 'account-validation.json').read_text())
           assert native['passed'] is True and native['sourceSha'] == os.environ['GITHUB_SHA']
-          expected = {'Twitchterino-Setup.exe', f"Twitchterino-{info['version']}-Windows-x64-4-contas.zip"}
+          expected = {'Twitchterino-Setup.exe'}
           seen = set()
           for line in (root / 'SHA256SUMS.txt').read_text().splitlines():
               digest, name = line.split('  ', 1)
@@ -216,4 +215,4 @@ jobs:
           PYVERIFY
       - name: Upload candidate assets to the verified draft without publishing
         run: |
-          gh release upload "$PREVIEW_TAG" --repo "$GITHUB_REPOSITORY" release-output/Twitchterino-Setup.exe release-output/*.zip release-output/SHA256SUMS.txt release-output/release-build-info.json release-output/account-validation.json
+          gh release upload "$PREVIEW_TAG" --repo "$GITHUB_REPOSITORY" release-output/Twitchterino-Setup.exe release-output/SHA256SUMS.txt release-output/release-build-info.json release-output/account-validation.json
