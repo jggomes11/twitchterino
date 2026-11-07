@@ -7,6 +7,7 @@ const path = require('node:path');
 const net = require('node:net');
 const { spawn, spawnSync } = require('node:child_process');
 const pkg = require('../package.json');
+const { closePage } = require('./cdp-client.cjs');
 
 const options = Object.fromEntries(process.argv.slice(2).map(arg => {
   const index = arg.indexOf('=');
@@ -248,7 +249,7 @@ async function freePort() {
           await evaluate(main, 'window.tt.showChannel(' + JSON.stringify(revealSlug) + ')');
           assert.equal(await evaluate(connection, 'window.__desktopValidationMarker'), 'same-document', 'Showing a player reloaded its document');
           report.allLivePlayback.revealWithoutReload = true;
-          await connection.call('Page.close');
+          await closePage(connection);
           await pause(1000);
         }
         await screenshot(main, 'all-live-players.png');

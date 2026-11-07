@@ -13,3 +13,10 @@ test('native account fixture requires natural exit after a failed quit command',
  try {await assert.rejects(quitApplication({child,ui:{call:async()=>{throw Error('quit failed');}}},25),/graceful|quit/); assert.equal(child.exitCode,null);assert.equal(child.signalCode,null);}
  finally {child.kill();}
 });
+
+test('closing a debugged page accepts its expected target disconnection but preserves other failures',async()=>{
+ const {closePage}=require('../scripts/cdp-client.cjs');
+ await closePage({call:async(method)=>{assert.equal(method,'Page.close');throw Error('Debug connection closed');}});
+ await assert.rejects(closePage({call:async()=>{throw Error('Protocol failure');}}),/Protocol failure/);
+ await assert.rejects(closePage({call:async()=>{throw Error('Debug command timed out: Page.close');}}),/timed out/);
+});

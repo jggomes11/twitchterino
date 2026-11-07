@@ -36,4 +36,12 @@ async function evaluate(client, expression) {
   if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
   return result.result.value;
 }
-module.exports = { connect, evaluate };
+async function closePage(client) {
+  try { await client.call('Page.close'); }
+  catch (error) {
+    // Chromium may detach a closing target before acknowledging Page.close.
+    // A timeout or any other protocol error is still a failed check.
+    if (error.message !== 'Debug connection closed') throw error;
+  }
+}
+module.exports = { connect, evaluate, closePage };
