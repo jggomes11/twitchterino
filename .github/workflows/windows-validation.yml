@@ -153,10 +153,19 @@ jobs:
           const end=script.indexOf('const sourceSha =');
           if(start<0||end<start)throw Error('Launcher generator changed');
           vm.runInNewContext(script.slice(start,end),{fs,path,output:'preview-output',pkg:require('./package.json')});
+          const warning='PRE-RELEASE DE VALIDACAO: QUATRO PERFIS\r\n\r\n'+
+            'A reabertura e o encerramento de perfis NAO passaram no runner Windows.\r\n'+
+            'Os quatro perfis iniciam, mas o processo adicional nao terminou no prazo.\r\n'+
+            'Valide os quatro logins, a reabertura e a saida independente no seu Windows.\r\n'+
+            'Nao trate este pacote como versao estavel. Nao envie credenciais ou perfis.\r\n\r\n';
+          const readme='preview-output/portable/LEIA-ME.txt';
+          fs.writeFileSync(readme,warning+fs.readFileSync(readme,'utf8'));
+          fs.writeFileSync('preview-output/portable/PREVIEW.txt',warning);
           '@ | node
           if ($LASTEXITCODE -ne 0) { throw 'Launcher generation failed' }
           Compress-Archive -Path preview-output/portable/* -DestinationPath Twitchterino-0.1.3-four-profile-preview.zip
           $PreviewDigest = (Get-FileHash Twitchterino-0.1.3-four-profile-preview.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Output "Preview ZIP SHA256: $PreviewDigest"
           "$PreviewDigest  Twitchterino-0.1.3-four-profile-preview.zip" | Set-Content -Encoding ascii Twitchterino-four-profile-preview-SHA256.txt
       - name: Upload only to the existing draft preview
         run: |

@@ -53,6 +53,8 @@ Windows x64 builds are published manually in this fork's [releases](https://gith
 
 The installer keeps the existing application ID and replaces an installation with that identity rather than installing alongside it. The visible name and default profile remain compatible. For four separate accounts, extract the entire `4-contas.zip` release asset and use `Abrir-Conta-1.cmd` through `Abrir-Conta-4.cmd`. Each launcher uses its own persistent profile under `%LOCALAPPDATA%\Twitchterino-Profiles\Conta-N`; reopening the same launcher focuses that profile's existing instance. These profiles are separate from the default app and earlier validation profiles; sign in separately in each official Twitch window. Updates keep the four profile paths stable. Do not share profile directories between processes or commit cookies, tokens, browser profiles or personal session data.
 
+In each account window, leave **Todas as lives online** off, set **Limite de lives** to **2**, and enable **Foco em bônus**, **Juntar pontos** and **Pegar baú sozinho**. Each account keeps its own channel list, balances and reports. These settings are the default for fresh profiles; updating the application preserves existing profile settings.
+
 The partner list remains public configuration fetched from the original author's GitHub Pages URL with the existing slug validation. It is separate from application updates.
 
 The user has confirmed real Windows login, point accrual and automatic bonus collection in the maintained build. Automated release validation additionally checks four simultaneous empty portable profiles and the same-profile instance lock; it does not prove point awards for four authenticated accounts.
