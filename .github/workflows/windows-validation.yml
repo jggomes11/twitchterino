@@ -170,7 +170,7 @@ jobs:
           PY
       - name: Create draft, upload verified assets and publish
         run: |
-          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Twitchterino $RELEASE_VERSION — múltiplas contas" --notes-file docs/releases/v0.1.3.pt-BR.md --draft
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Twitchterino $RELEASE_VERSION" --notes-file "docs/releases/v$RELEASE_VERSION.pt-BR.md" --draft
           gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" release-output/Twitchterino-Setup.exe release-output/SHA256SUMS.txt release-output/release-build-info.json release-output/account-validation.json
           gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
 
