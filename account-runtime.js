@@ -369,13 +369,24 @@ function addPurchase(p) {
 function matchPurchase(drop, rewards) {
   const list = rewards.filter((r) => r.available).sort((a, b) => a.hours - b.hours);
   let best = null;
+  let signature = null;
+  let ambiguous = false;
   const walk = (start, picked, sum) => {
-    if (sum >= drop && sum <= drop + 60) { if (!best || picked.length < best.length) best = picked; return; }
+    if (sum >= drop && sum <= drop + 60) {
+      const key = picked.map((r) => `${r.kind}:${r.hours}`).sort().join(',');
+      if (!best || picked.length < best.length) {
+        best = picked;
+        signature = key;
+        ambiguous = false;
+      } else if (picked.length === best.length && key !== signature) ambiguous = true;
+      return;
+    }
     if (picked.length >= 4 || sum > drop + 60) return;
     for (let i = start; i < list.length; i++) walk(i, [...picked, list[i]], sum + list[i].cost);
   };
   walk(0, [], 0);
-  return best || [];
+  // A balance alone cannot distinguish equally plausible bonus packages.
+  return ambiguous ? [] : best || [];
 }
 
 function registerDrop(slug, s, drop) {
@@ -422,7 +433,9 @@ function watchRedemptions(slug, wc) {
       if (!ok) return;
       const s = status.get(slug) || {};
       s.pendingSpent = (s.pendingSpent || 0) + (Number(input.cost) || 0);
-      const [reward] = parseRewards([{ title: input.title, cost: input.cost, isEnabled: true }]);
+      // The reward ID is authoritative; request titles can be absent or stale.
+      const reward = (s.rewards || []).find((r) => r.id && r.id === input.rewardID)
+        || parseRewards([{ title: input.title, cost: input.cost, isEnabled: true }])[0];
       if (reward) addPurchase({ t: Date.now(), kind: reward.kind, hours: reward.hours, cost: reward.cost, slug });
       status.set(slug, s);
       if (configDirty) { configDirty = false; saveConfig(); }
