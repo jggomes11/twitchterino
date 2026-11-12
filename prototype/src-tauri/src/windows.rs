@@ -1167,6 +1167,17 @@ fn shutdown(app: &AppHandle) {
     webview::keep_awake(app, false);
 }
 pub fn run() {
+    if std::env::args().any(|a| a == "--smoke-test") {
+        std::panic::set_hook(Box::new(|info| {
+            if let Some(path) = std::env::var_os("TERINO_SMOKE_OUTPUT") {
+                let _ = std::fs::write(
+                    path,
+                    serde_json::to_vec_pretty(&json!({"passed":false,"panic":info.to_string()}))
+                        .unwrap_or_default(),
+                );
+            }
+        }));
+    }
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             if let Some(w) = app.get_webview_window("main") {
