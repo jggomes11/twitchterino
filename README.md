@@ -68,3 +68,7 @@ The user confirmed real Windows login, point accrual and automatic bonus collect
 ## Attribution
 
 Original project: [ViinniSantoos/twitchterino](https://github.com/ViinniSantoos/twitchterino). Original author: VinniiSaantos. Maintenance fork: [jggomes11/twitchterino](https://github.com/jggomes11/twitchterino). License: [MIT](LICENSE).
+
+## Documentação técnica do estado atual
+
+A [base técnica](docs/technical/README.md) reúne arquitetura, regras de negócio rastreáveis, integrações, persistência, testes, inventário e um protocolo de medição de desempenho. Descreve a versão publicada e separa evidência de código/testes de consumo de recursos ainda não medido.
