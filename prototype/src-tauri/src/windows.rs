@@ -1,3 +1,4 @@
+pub const BROWSER_ARGS:&str="--autoplay-policy=no-user-gesture-required --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --disable-background-media-suspend --disable-features=CalculateNativeWinOcclusion,BackgroundVideoTrackOptimization,IntensiveWakeUpThrottling";
 use crate::{
     model::{self, Account, AccountId, Platform},
     platform::{self, Credentials},
@@ -250,7 +251,7 @@ fn flag(args: &[Value]) -> Result<bool, String> {
         .as_bool()
         .ok_or_else(|| "Valor booleano obrigatório".into())
 }
-fn verified_credentials(
+pub fn verified_credentials(
     app: &AppHandle,
     id: &AccountId,
     ticket: u64,
@@ -510,6 +511,15 @@ pub fn credentials(app: &AppHandle, id: &AccountId) -> Result<Credentials, Strin
             })
             .unwrap_or_else(|| Ok(String::new()))
     };
+    let agent = {
+        rt.engine
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|v| v["userAgent"].as_str())
+            .unwrap_or("")
+            .to_string()
+    };
     Ok(Credentials {
         token: read(if rt.platform == Platform::Twitch {
             "auth-token"
@@ -518,14 +528,7 @@ pub fn credentials(app: &AppHandle, id: &AccountId) -> Result<Credentials, Strin
         })?,
         device: read("unique_id")?,
         xsrf: read("XSRF-TOKEN")?,
-        agent: rt
-            .engine
-            .lock()
-            .unwrap()
-            .as_ref()
-            .and_then(|v| v["userAgent"].as_str())
-            .unwrap_or("")
-            .to_string(),
+        agent,
         cookies: cookies
             .iter()
             .map(|c| format!("{}={}", c.name(), c.value()))
@@ -665,12 +668,28 @@ pub fn open_remote(
     let app_popup = app.clone();
     let id_popup = id.clone();
     let popup_dir = dir.clone();
-    let builder=WebviewWindowBuilder::new(app,&name,WebviewUrl::External("about:blank".parse().unwrap()))
-        .title(format!("{} — {} — {}",rt.platform.name(),id.0,slug.unwrap_or("Login")))
-        .data_directory(dir).additional_browser_args("--autoplay-policy=no-user-gesture-required --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --disable-background-media-suspend --disable-features=CalculateNativeWinOcclusion,BackgroundVideoTrackOptimization,IntensiveWakeUpThrottling")
-        .inner_size(if kind=="player"{480.}else{1000.},if kind=="player"{270.}else{800.}).visible(false)
-        .on_navigation(|u|u.scheme()=="https"||u.as_str()=="about:blank")
-        .on_new_window(move|url,features|owned_popup(&app_popup,&id_popup,&popup_dir,url,features));
+    let builder = WebviewWindowBuilder::new(
+        app,
+        &name,
+        WebviewUrl::External("about:blank".parse().unwrap()),
+    )
+    .title(format!(
+        "{} — {} — {}",
+        rt.platform.name(),
+        id.0,
+        slug.unwrap_or("Login")
+    ))
+    .data_directory(dir)
+    .additional_browser_args(BROWSER_ARGS)
+    .inner_size(
+        if kind == "player" { 480. } else { 1000. },
+        if kind == "player" { 270. } else { 800. },
+    )
+    .visible(false)
+    .on_navigation(|u| u.scheme() == "https" || u.as_str() == "about:blank")
+    .on_new_window(move |url, features| {
+        owned_popup(&app_popup, &id_popup, &popup_dir, url, features)
+    });
     let w = builder
         .build()
         .map_err(|_| "Falha ao criar página oficial")?;
@@ -939,6 +958,7 @@ impl Drop for PollGuard<'_> {
 async fn poll_account(app: AppHandle, id: AccountId, c: Credentials, ticket: u64) {
     let rt = app.state::<Runtime>();
     if rt.polling[id.index()].swap(true, Ordering::SeqCst) {
+        rt.next_poll[id.index()].fetch_min(model::now() + 1000, Ordering::SeqCst);
         return;
     }
     let _guard = PollGuard(&rt.polling[id.index()]);
@@ -1031,7 +1051,7 @@ async fn poll_account(app: AppHandle, id: AccountId, c: Credentials, ticket: u64
         crate::chest::schedule(&app, &id);
         Ok::<(), String>(())
     };
-    let result = tokio::select! {v=work=>v,_=cancel.changed()=>return};
+    let result = tokio::select! {v=tokio::time::timeout(Duration::from_secs(300),work)=>v.unwrap_or_else(|_|Err("Consulta excedeu cinco minutos; será repetida".into())),_=cancel.changed()=>return};
     if rt.current(&id, ticket) {
         if let Err(e) = result {
             rt.apply_current(&id, ticket, |a| {

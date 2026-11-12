@@ -35,7 +35,7 @@ while ([DateTime]::UtcNow -lt $end) {
     foreach ($entry in $inventory) { if ($ids.Contains([int]$entry.ParentProcessId) -and $ids.Add([int]$entry.ProcessId)) { $added=$true } }
   } while ($added)
   $resident=@{}
-  try { Get-CimInstance Win32_PerfRawData_PerfProc_Process -OperationTimeoutSec 3 | ForEach-Object { $resident[[int]$_.IDProcess]=[long]$_.WorkingSetPrivate } } catch {}
+  try { Get-CimInstance Win32_PerfRawData_PerfProc_Process -OperationTimeoutSec 3 | ForEach-Object { if ($null -ne $_.WorkingSetPrivate) { $resident[[int]$_.IDProcess]=[long]$_.WorkingSetPrivate } } } catch {}
   $rows=[Collections.Generic.List[object]]::new()
   [long]$residentBytes=0
   $residentComplete=$true
@@ -69,6 +69,6 @@ function Statistics($Values) {
   if ($ordered.Count -eq 0) { return $null }
   @{ median=$ordered[[Math]::Floor(($ordered.Count-1)*0.5)]; p95=$ordered[[Math]::Ceiling(($ordered.Count-1)*0.95)]; peak=$ordered[-1] }
 }
-@{ samples=$totals.Count; endedEarly=$endedEarly; sampleSeconds=5; privateBytes=(Statistics @($totals | ForEach-Object privateBytes)); residentPrivateBytes=(Statistics @($totals | ForEach-Object residentPrivateBytes)); residentCompleteSamples=@($totals | Where-Object { $null -ne $_.residentPrivateBytes }).Count; cpuPercentOfMachine=(Statistics @($totals | ForEach-Object cpuPercent)); workingSet='per-process only, shared pages may overlap'; gpu=$null; network=$null; realPoints='record per channel manually'; statistics='nearest-rank approximation, median lower central observation' } | ConvertTo-Json -Depth 5 | Set-Content $summaryPath
+@{ samples=$totals.Count; endedEarly=$endedEarly; sampleSeconds=5; privateBytes=(Statistics @($totals | ForEach-Object privateBytes)); residentPrivateBytes=(Statistics @($totals | ForEach-Object residentPrivateBytes)); residentCompleteSamples=@($totals | Where-Object { $null -ne $_.residentPrivateBytes }).Count; cpuPercentOfMachine=(Statistics @($totals | ForEach-Object cpuPercent)); workingSet='per-process only, shared pages may overlap'; gpu=$null; network=$null; realPoints='record per channel manually'; statistics='median: floor((n-1)*0.5); p95: ceil((n-1)*0.95); peak: maximum' } | ConvertTo-Json -Depth 5 | Set-Content $summaryPath
 $totals | Export-Csv (Join-Path $OutputDirectory 'totals.csv') -NoTypeInformation -Encoding utf8
 Write-Host "Medição salva em $OutputDirectory. Confirme os pontos por live separadamente."

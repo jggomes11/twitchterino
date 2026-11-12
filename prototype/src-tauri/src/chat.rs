@@ -52,7 +52,7 @@ pub async fn receive(app: AppHandle, id: AccountId) {
         }
         let enabled = {
             let rt = app.state::<Runtime>();
-            (rt.account(&id, |a| a.used) || rt.is_selected(&id))
+            rt.account(&id, |a| a.used) || rt.is_selected(&id)
         };
         if !enabled {
             tokio::time::sleep(Duration::from_secs(5)).await;

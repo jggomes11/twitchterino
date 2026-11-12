@@ -87,7 +87,7 @@ async fn claim_one(
     ticket: u64,
 ) -> Result<(), String> {
     let rt = app.state::<Runtime>();
-    let c = windows::credentials(app, id)?;
+    let c = windows::verified_credentials(app, id, ticket)?;
     let fingerprint = c.fingerprint();
     let identity = rt
         .account(id, |a| a.identity.clone())
@@ -95,32 +95,50 @@ async fn claim_one(
     let w = windows::open_remote(app, id, "chest", Some(slug), false)?;
     let expected = format!("/popout/{slug}/chat");
     let script = format!(
-        r#"new Promise(resolve=>{{const start=Date.now();const t=setInterval(()=>{{if(location.origin!=='https://www.twitch.tv'||location.pathname.replace(/\/$/,'')!=={}){{clearInterval(t);resolve({{clicked:false}});return;}}const icon=document.querySelector('.claimable-bonus__icon');const button=icon&&icon.closest('button');if(button&&!button.disabled&&button.getAttribute('aria-disabled')!=='true'&&!String(button.className).includes('ScCoreButtonDestructive')){{clearInterval(t);button.click();resolve({{clicked:true}});}}else if(Date.now()-start>=40000){{clearInterval(t);resolve({{clicked:false}});}}}},500);}})"#,
+        r#"(()=>{{if(location.origin!=='https://www.twitch.tv'||location.pathname.replace(/\/$/,'')!=={})return false;const icon=document.querySelector('.claimable-bonus__icon');const button=icon&&icon.closest('button');if(!button||button.disabled||button.getAttribute('aria-disabled')==='true'||String(button.className).includes('ScCoreButtonDestructive'))return false;button.click();return true;}})()"#,
         json!(expected)
     );
-    // Navigation may still be in progress. Retry only the restricted bonus selector on the fixed page.
+    let deadline = std::time::Instant::now() + Duration::from_secs(40);
     let mut clicked = false;
-    for _ in 0..4 {
-        if !rt.current(id, ticket) || !rt.account(id, |a| a.auto_chest) {
-            return Err("Sessão alterada".into());
+    while std::time::Instant::now() < deadline {
+        if !rt.current(id, ticket)
+            || !rt.account(id, |a| {
+                a.auto_chest && a.identity.as_ref().is_some_and(|i| i.id == identity.id)
+            })
+            || windows::verified_credentials(app, id, ticket)?.fingerprint() != fingerprint
+        {
+            return Err("Proprietário do baú alterado".into());
         }
-        let v = webview::cdp(
+        let result = webview::cdp(
             &w,
             "Runtime.evaluate",
-            json!({"expression":script,"awaitPromise":true,"returnByValue":true}),
+            json!({"expression":script,"returnByValue":true}),
         )
-        .await?;
-        if v.pointer("/result/value/clicked") == Some(&json!(true)) {
+        .await;
+        if !rt.current(id, ticket)
+            || !rt.account(id, |a| a.auto_chest)
+            || windows::verified_credentials(app, id, ticket)?.fingerprint() != fingerprint
+        {
+            return Err("Proprietário do baú alterado".into());
+        }
+        if result
+            .ok()
+            .and_then(|v| v.pointer("/result/value").and_then(|v| v.as_bool()))
+            .unwrap_or(false)
+        {
             clicked = true;
             break;
         }
-        tokio::time::sleep(Duration::from_millis(700)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
     if !clicked {
         return Err("Botão de bônus indisponível".into());
     }
     for _ in 0..5 {
-        if !rt.current(id, ticket) || windows::credentials(app, id)?.fingerprint() != fingerprint {
+        if !rt.current(id, ticket)
+            || !rt.account(id, |a| a.auto_chest)
+            || windows::verified_credentials(app, id, ticket)?.fingerprint() != fingerprint
+        {
             return Err("Sessão alterada".into());
         }
         let query=format!("query{{currentUser{{id login}} channel:user(login:{}){{channel{{self{{communityPoints{{balance availableClaim{{id}}}}}}}}}}}}",json!(slug));
@@ -133,6 +151,14 @@ async fn claim_one(
             Some(json!({"query":query})),
         )
         .await?;
+        if !rt.current(id, ticket)
+            || !rt.account(id, |a| {
+                a.auto_chest && a.identity.as_ref().is_some_and(|i| i.id == identity.id)
+            })
+            || windows::verified_credentials(app, id, ticket)?.fingerprint() != fingerprint
+        {
+            return Err("Proprietário do baú alterado".into());
+        }
         if let Some((balance, new_claim)) =
             platform::confirmed_claim(&v, &identity.id, before, claim)
         {

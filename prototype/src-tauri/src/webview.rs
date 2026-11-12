@@ -163,7 +163,7 @@ pub fn instrument(
             let handler =
                 webview2_com::NavigationCompletedEventHandler::create(Box::new(move |_, args| {
                     if let Some(args) = args {
-                        let mut success = ::windows::Win32::Foundation::BOOL::default();
+                        let mut success = Default::default();
                         args.IsSuccess(&mut success)?;
                         if !success.as_bool() {
                             let rt = fail_app.state::<Runtime>();
@@ -356,6 +356,10 @@ pub fn smoke(app: AppHandle) {
         if let Ok(v)=cdp(&main,"Page.captureScreenshot",json!({"format":"png","captureBeyondViewport":false})).await{if let Some(data)=v["data"].as_str(){if let Ok(bytes)=STANDARD.decode(data){if let Some(out)=std::env::var_os("TERINO_SMOKE_OUTPUT"){let _=std::fs::write(PathBuf::from(out).with_extension("png"),bytes);}}}}
         let mut windows=vec![];
         for n in 1..=4{let id=AccountId::parse(&format!("account-{n}"))?;let w=windows::open_remote(&app,&id,"auth",None,false)?;let cookie=tauri::webview::Cookie::build(("terino-prototype-fixture",format!("slot-{n}"))).domain(app.state::<Runtime>().platform.origin().parse::<url::Url>().unwrap().host_str().unwrap().to_string()).path("/").secure(true).expires(tauri::webview::cookie::time::OffsetDateTime::now_utc()+tauri::webview::cookie::time::Duration::days(1)).build();if std::env::var("TERINO_SMOKE_PHASE").unwrap_or_default()!="read"{w.set_cookie(cookie).map_err(|_|"Falha ao definir cookie fictício")?;}windows.push(w);}
+        let mirror=tauri::WebviewWindowBuilder::new(&app,"account-1-mirror",tauri::WebviewUrl::External(format!("{}/robots.txt",app.state::<Runtime>().platform.origin()).parse().unwrap())).data_directory(app.state::<Runtime>().root.join("webview").join("account-1")).additional_browser_args(windows::BROWSER_ARGS).visible(false).build().map_err(|_|"Falha ao criar segundo controle do perfil")?;
+        let sibling=mirror.cookies().map_err(|_|"Falha ao ler cookies no segundo controle")?;
+        if !sibling.iter().any(|c|c.name()=="terino-prototype-fixture"&&c.value()=="slot-1"){return Err("Login não compartilhado dentro do próprio slot".into())}
+        mirror.destroy().map_err(|_|"Falha ao encerrar segundo controle")?;
         visibility(&windows[0],false);
         let background=cdp(&windows[0],"Runtime.evaluate",json!({"expression":"document.visibilityState","returnByValue":true})).await?;
         if background.pointer("/result/value")!=Some(&json!("visible")){return Err("WebView de coleta permaneceu oculto para a página".into())}
@@ -366,7 +370,7 @@ pub fn smoke(app: AppHandle) {
             if denied.pointer("/result/value")!=Some(&json!(true)){return Err("Página remota acessou comando nativo".into())}
         }
         for w in windows{w.destroy().map_err(|_|"Falha ao encerrar perfil")?;}
-        Ok::<_,String>(json!({"passed":true,"accounts":4,"cookieIsolation":true,"remoteIpcDenied":true,"backgroundVisible":true,"fetchAvailable":true,"realMediaValidated":false,"persistenceRead":std::env::var("TERINO_SMOKE_PHASE").unwrap_or_default()=="read","realLogin":false,"realPointsMeasured":false}))
+        Ok::<_,String>(json!({"passed":true,"accounts":4,"cookieIsolation":true,"sameSlotShared":true,"remoteIpcDenied":true,"backgroundVisible":true,"fetchAvailable":true,"realMediaValidated":false,"persistenceRead":std::env::var("TERINO_SMOKE_PHASE").unwrap_or_default()=="read","realLogin":false,"realPointsMeasured":false}))
     }.await;
         let output = std::env::var_os("TERINO_SMOKE_OUTPUT")
             .map(PathBuf::from)
