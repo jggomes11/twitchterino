@@ -1,0 +1,70 @@
+name: Tauri Windows prototype
+on:
+  workflow_dispatch:
+  push:
+    branches: ['codex/tauri-performance-prototype']
+    paths: ['prototype/**', '.github/workflows/tauri-prototype.yml']
+permissions:
+  contents: read
+concurrency:
+  group: tauri-prototype-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: prototype/src-tauri
+      - name: Prepare preserved interface
+        run: node prototype/prepare-ui.cjs
+      - name: Test bridge
+        run: node --test prototype/tests/*.test.cjs
+      - name: Test Rust contracts
+        working-directory: prototype/src-tauri
+        run: cargo test --locked
+      - name: Build Windows executable
+        working-directory: prototype/src-tauri
+        run: cargo build --release --locked
+      - name: Validate native profiles and IPC
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force prototype/output | Out-Null
+          $env:TERINO_SMOKE_OUTPUT = Join-Path $PWD 'prototype/output/native-smoke.json'
+          $testProcess = Start-Process prototype/src-tauri/target/release/terino-prototype.exe -ArgumentList '--smoke-test' -PassThru
+          if (-not $testProcess.WaitForExit(120000)) {
+            Stop-Process -Id $testProcess.Id -Force -ErrorAction SilentlyContinue
+            throw 'Native smoke timed out; cleanup is not a passing test.'
+          }
+          if ($testProcess.ExitCode -ne 0) {
+            if (Test-Path $env:TERINO_SMOKE_OUTPUT) { Get-Content $env:TERINO_SMOKE_OUTPUT }
+            throw "Native smoke failed: $($testProcess.ExitCode)"
+          }
+          $proof = Get-Content $env:TERINO_SMOKE_OUTPUT -Raw | ConvertFrom-Json
+          if (-not $proof.passed -or $proof.accounts -ne 4 -or -not $proof.cookieIsolation -or -not $proof.remoteIpcDenied) { throw 'Incomplete native proof' }
+      - name: Package prototype evidence
+        shell: pwsh
+        run: |
+          $package = Get-Content package.json -Raw | ConvertFrom-Json
+          $displayName = if ($package.name -eq 'kickterino') { 'Kickterino' } else { 'Twitchterino' }
+          $binary = "$displayName-Tauri-Prototype.exe"
+          Copy-Item prototype/src-tauri/target/release/terino-prototype.exe "prototype/output/$binary"
+          Copy-Item prototype/README.md,prototype/Measure-Prototype.ps1,LICENSE prototype/output
+          $metadata = @{ product=$displayName; prototype=$true; source=$env:GITHUB_SHA; run=$env:GITHUB_RUN_ID; target='x86_64-pc-windows-msvc'; rust=(rustc --version); tauri='2.12.5'; realLoginValidated=$false; realPointsMeasured=$false; performanceMeasured=$false }
+          $metadata | ConvertTo-Json | Set-Content prototype/output/build-info.json
+          $hash = (Get-FileHash "prototype/output/$binary" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $binary" | Set-Content prototype/output/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ github.event.repository.name }}-tauri-prototype-windows
+          path: prototype/output/
+          if-no-files-found: warn

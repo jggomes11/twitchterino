@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Twitchterino Prototype",
+  "version": "0.1.0",
+  "identifier": "com.jggomes11.twitchterino.prototype",
+  "build": {"frontendDist": "../ui"},
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [{"label":"main","title":"Twitchterino — Protótipo Tauri","width":1280,"height":820,"minWidth":800,"minHeight":600}],
+    "security": {"csp":"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data:; connect-src 'self' ipc: http://ipc.localhost https://ipc.localhost; object-src 'none'; frame-src 'none'; base-uri 'self'","capabilities":["main"]}
+  },
+  "bundle": {"active":false,"icon":["icons/icon.png","icons/icon.ico"]}
+}

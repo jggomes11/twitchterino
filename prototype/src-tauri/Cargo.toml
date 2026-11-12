@@ -1,0 +1,30 @@
+[package]
+name = "terino-prototype"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+kick = []
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+url = "2"
+base64 = "0.22"
+percent-encoding = "2"
+sha2 = "0.10"
+chrono = { version = "0.4", features = ["serde"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "stream"] }
+futures-util = "0.3"
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
+[target.'cfg(windows)'.dependencies]
+tauri = { version = "=2.12.5", features = ["tray-icon", "image-png"] }
+tauri-plugin-single-instance = "2"
+webview2-com = "0.39"
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Power", "Win32_Graphics_Dwm"] }
+[target.'cfg(windows)'.build-dependencies]
+tauri-build = { version = "2", features = [] }

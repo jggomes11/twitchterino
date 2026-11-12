@@ -1,6 +1,6 @@
 # Protótipo de desempenho com Tauri — Twitchterino e Kickterino
 
-Data: 2026-11-12. Estado: proposta para revisão do usuário; escolha de avaliar Tauri alinhada, migração definitiva ainda não decidida.
+Data: 2026-11-12. Estado: início do protótipo aprovado pelo usuário na conversa (“ok, podemos iniciar”); migração definitiva ainda não decidida.
 
 Este documento tem cópia idêntica nos dois repositórios. Complementa o levantamento de [estado atual](../../technical/ESTADO_ATUAL.md), [regras](../../technical/REGRAS_NEGOCIO.md), [desempenho](../../technical/DESEMPENHO.md) e [diferenças entre plataformas](../../technical/COMPARATIVO.md). O levantamento permanece um registro histórico, sem resultados de benchmark.
 

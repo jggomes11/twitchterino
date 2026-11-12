@@ -10,3 +10,8 @@ release-output/
 
 # Isolated development worktrees.
 .worktrees/
+
+# Protótipo Tauri (saídas geradas)
+/prototype/ui/
+/prototype/src-tauri/target/
+/prototype/output/
