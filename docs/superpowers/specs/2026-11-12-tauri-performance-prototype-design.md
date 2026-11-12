@@ -8,6 +8,8 @@ Este documento tem cópia idêntica nos dois repositórios. Complementa o levant
 
 O usuário quer reduzir o consumo dos dois aplicativos, preservando suas regras de negócio e a disposição de interface já aprovada. O alvo é somente Windows. Foi escolhido avaliar primeiro Tauri com Rust, pelo reaproveitamento da interface web e pelo retrabalho adicional de reconstruí-la em C#/WPF. A expectativa de desempenho parecido entre as alternativas é uma hipótese, não uma medição.
 
+O usuário definiu **duas lives simultâneas por conta** como cenário de teste, mantendo a referência de operação atual. Esse número fixa a carga do ensaio; o recebimento efetivo de pontos nas duas lives será verificado em cada plataforma. Os quatro slots opcionais continuam fazendo parte dos produtos.
+
 O resultado desta etapa será um protótipo descartável e um relatório comparativo. Não representa autorização para substituir as releases ou para uma migração completa. A continuidade depende das evidências de funcionamento e consumo. O reaproveitamento futuro do código do protótipo precisará de uma decisão própria.
 
 ## Abordagens consideradas
@@ -77,17 +79,19 @@ Referências: Twitchterino v0.1.5, fonte `a0942c6bb25a6a142fdab5a09c4b199a5b698e
 
 Usar o protocolo de [DESEMPENHO.md](../../technical/DESEMPENHO.md): estabilização >=10 min, observação >=30 min, amostras a cada 5 s, pelo menos três rodadas, teste prolongado >=8 h. Ampliar a janela quando os pontos não permitirem conclusão. Alternar a ordem das versões e evitar que Electron e protótipo disputem a mesma conta/canal durante a comparação individual.
 
-| Cenário | Objetivo |
-| --- | --- |
-| Sem login, UI e bandeja | Medir shell, slots vazios e atualização de interface |
-| Uma conta autenticada, coleta pausada | Separar sessão/chat do custo da mídia |
-| Uma conta × duas lives | Comparar operação básica e qualidade efetiva |
-| Duas contas × duas lives | Verificar isolamento, concorrência e troca de seleção |
-| Quatro contas × duas lives | Avaliar oito players por app quando houver contas disponíveis para o ensaio |
-| Dois apps simultâneos | Medir consumo combinado e interferência, com a mesma matriz de contas/players |
-| Falhas, transientes e >=8 h | Observar recuperação, picos e crescimento de memória |
+O cenário principal é **uma conta autenticada com duas lives simultâneas em cada aplicativo**, comparando Electron e Tauri separadamente. Uma conta como referência unitária é uma escolha técnica do autor; não presume quantas contas o usuário usará no dia a dia. Medir com UI aberta e na bandeja, e usar a mesma carga no ensaio prolongado. Na rodada com os dois apps simultâneos, usar uma conta e duas lives em cada app, totalizando quatro players no PC. Ensaios com mais contas são complementares para isolamento e escala e mantêm duas lives por conta; não ampliar a concorrência por conta para procurar pontos adicionais.
 
-A matriz acima é uma proposta inicial, não uma declaração do uso habitual do usuário. Prioridade dos cenários e disponibilidade de contas reais ainda precisam ser confirmadas. A falta de quatro contas reais não pode ser substituída por contas fictícias numa conclusão sobre consumo de mídia ou pontos.
+| Cenário | Papel no ensaio | Objetivo |
+| --- | --- | --- |
+| Sem login, UI e bandeja | Controle | Medir shell, slots vazios e atualização de interface |
+| Uma conta autenticada, coleta pausada | Controle | Separar sessão/chat do custo da mídia |
+| Uma conta × duas lives por app | Principal | Comparar consumo, qualidade efetiva e pontos recebidos nas duas lives |
+| Duas contas × duas lives por conta | Complementar | Verificar isolamento, concorrência e troca de seleção |
+| Quatro contas × duas lives por conta | Complementar, conforme disponibilidade | Avaliar oito players por app quando houver contas disponíveis para o ensaio |
+| Dois apps simultâneos, uma conta × duas lives em cada | Principal combinado | Medir consumo combinado e interferência com quatro players no PC |
+| Falhas, transientes e >=8 h, uma conta × duas lives por app | Principal prolongado | Observar recuperação, picos e crescimento de memória |
+
+A carga de duas lives por conta foi definida pelo usuário. A quantidade habitual de contas e a disponibilidade de contas reais para os cenários complementares não foram informadas; isso não impede priorizar a comparação unitária acima. A falta de quatro contas reais não pode ser substituída por contas fictícias numa conclusão sobre consumo de mídia ou pontos.
 
 Registrar memória privada/commit e working set por árvore de processos, CPU, GPU/decoder quando disponível, tráfego de rede, quantidade efetiva de players, início frio e responsividade. Definir unidades e método; apresentar mediana, p95, pico e dispersão entre rodadas. Não somar várias vezes memória compartilhada nem somar campos globais repetidos por slot. Anotar recursos indisponíveis na coleta, em vez de preencher zero.
 
@@ -96,7 +100,7 @@ O candidato combina mudança de runtime com criação sob demanda e agendamento 
 ## Evidência necessária e decisão de continuidade
 
 1. Guardas de conta, token, origem e cancelamento verificadas em cenários controlados; login e reprodução demonstrados no Windows.
-2. Confirmação real de pontos e comportamento de chat em cada plataforma; baú Twitch confirmado quando disponível. Caso não apareça baú durante o ensaio, o resultado correspondente permanece inconclusivo.
+2. Confirmação real de pontos nas duas lives simultâneas da mesma conta e comportamento de chat em cada plataforma; baú Twitch confirmado quando disponível. Não concluir sucesso somente porque uma das lives recebeu pontos. Caso uma live não receba pontos, investigar e registrar a falha ou limitação observada. Janela sem evidência suficiente ou sem baú disponível produz resultado inconclusivo na verificação correspondente, sem inventar créditos.
 3. Redução reproduzível de memória no cenário relevante, além da variação entre rodadas, sem regressão material observada em CPU, GPU, responsividade ou coleta. Mostrar dados brutos e limites da comparação; um saldo sem aumento em ambas as versões exige investigação, não aprovação automática.
 4. Sessões isoladas e persistentes, UI/bandeja, recuperação e encerramento funcionando dentro do escopo. Funcionalidade ainda não portada continua explicitamente pendente.
 5. Usuário avalia benefício medido e esforço restante antes de autorizar migração completa. Nenhuma meta percentual ou limite de MB foi acordado; a escolha de um ganho mínimo satisfatório fica para a leitura dos resultados, com os dados expostos.
@@ -105,8 +109,9 @@ Resultados possíveis: seguir com Tauri; ajustar a organização e repetir somen
 
 ## Questões em aberto e escolhas deixadas à implementação
 
-- **Do usuário:** carga habitual de contas/lives em cada app e características do PC alvo, para priorizar cenários. Não presumir quatro contas em uso só porque existem quatro slots.
-- **Propostas do autor sujeitas à revisão:** Twitch antes de Kick, escopo reduzido do protótipo, Windows 10/11 x64, novos logins em perfis separados e matriz inicial de medição.
+- **Definido pelo usuário:** duas lives simultâneas por conta como carga do teste, mantendo a referência de operação atual em cada plataforma.
+- **Informações a registrar no ensaio:** características do PC alvo e disponibilidade de contas para verificações complementares. A quantidade habitual de contas não foi informada; não presumir quatro contas em uso só porque existem quatro slots.
+- **Propostas do autor sujeitas à revisão:** Twitch antes de Kick, escopo reduzido do protótipo, Windows 10/11 x64, novos logins em perfis separados, referência principal de uma conta por app e ensaios complementares com mais contas.
 - **Da implementação:** versões estáveis exatas, organização de crates, bibliotecas de transporte/serialização, ferramenta de coleta Windows e forma de acessar APIs nativas. Registrar as escolhas antes de medir e manter o núcleo do protótipo descartável.
 - **A provar, não a decidir por suposição:** isolamento com perfis/ambiente WebView2, captura dos eventos necessários, compatibilidade de login/requisições e crédito efetivo com reprodução em segundo plano.
 
