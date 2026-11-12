@@ -24,13 +24,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: prototype/src-tauri
+          cache-on-failure: true
       - name: Prepare preserved interface
         run: node prototype/prepare-ui.cjs
       - name: Test bridge
         run: node --test prototype/tests/*.test.cjs
       - name: Test Rust contracts
         working-directory: prototype/src-tauri
-        run: cargo test --locked
+        run: cargo test --release --locked
       - name: Build Windows executable
         working-directory: prototype/src-tauri
         run: cargo build --release --locked

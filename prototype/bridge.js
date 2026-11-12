@@ -3,6 +3,7 @@
   function createBridge(invoke,listen){
     let selected='account-1',epoch=0,initialized=false;
     const valid=id=>/^account-[1-4]$/.test(id);
+    let initial;const initialize=()=>initial||(initial=invoke('snapshot'));
     const call=async(command,...args)=>{
       const id=selected,ticket=epoch;
       const reply=await invoke('account_command',{id,command,args});
@@ -16,11 +17,11 @@
     });};
     const unsupported=()=>Promise.reject(new Error('Função fora do escopo deste protótipo.'));
     return Object.freeze({
-      selectAccount:async id=>{if(!valid(id))throw new Error('Conta inválida');initialized=true;selected=id;epoch++;return invoke('select_account',{id});},
-      getState:async()=>{const state=await invoke('snapshot');if(!initialized&&valid(state.accountId)){selected=state.accountId;initialized=true;}return state;},
+      selectAccount:async id=>{if(!valid(id))throw new Error('Conta inválida');initialized=true;selected=id;const revision=++epoch;const initialState=await initialize();return invoke('select_account',{id,revision,uiGeneration:initialState?.uiGeneration||0});},
+      getState:async()=>{const state=await initialize();if(!initialized&&valid(state.accountId)){selected=state.accountId;initialized=true;}return state;},
       addChannel:slug=>call('channels:add',slug),removeChannel:slug=>call('channels:remove',slug),
-      setFarming:on=>call('farming:set',on),setMaxWatchers:n=>call('maxWatchers:set',n),
-      setRotation:on=>call('rotation:set',on),setBonusTarget:kind=>call('bonusTarget:set',kind),
+      setFarming:on=>call('farming:set',on),setMaxWatchers:n=>call('maxWatchers:set',Number(n)),
+      setRotation:on=>call('rotation:set',on),setBonusTarget:kind=>call('bonusTarget:set',typeof kind==='string'&&/^(0|300|500|1000)$/.test(kind)?Number(kind):kind),
       setLowQuality:on=>call('lowQuality:set',on),setAutoChest:on=>call('autoChest:set',on),
       toggleFavorite:slug=>call('favorite:toggle',slug),refresh:()=>call('refresh'),
       showLogin:()=>call('login:show'),logout:()=>call('logout'),

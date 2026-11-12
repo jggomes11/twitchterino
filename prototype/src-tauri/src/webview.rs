@@ -2,6 +2,8 @@ use crate::{
     model::{self, AccountId, Platform},
     windows::{self, Runtime},
 };
+use ::windows::core::{Interface, PCWSTR, PWSTR};
+use ::windows::Win32::UI::WindowsAndMessaging::*;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 use std::{
@@ -15,24 +17,21 @@ use webview2_com::{
     DevToolsProtocolEventReceivedEventHandler, Microsoft::Web::WebView2::Win32::*,
     PermissionRequestedEventHandler, ProcessFailedEventHandler,
 };
-use windows::core::{Interface, PCWSTR, PWSTR};
-use windows::Win32::UI::WindowsAndMessaging::*;
 
 pub async fn cdp(w: &WebviewWindow, method: &str, params: Value) -> Result<Value, String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let method = method.to_string();
+    let timeout = if method == "Runtime.evaluate" && params["awaitPromise"] == true {
+        45
+    } else {
+        20
+    };
     let params = params.to_string();
     w.with_webview(move |view| unsafe {
         let response =
             CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |hr, result| {
                 let value = if hr.is_ok() {
-                    result
-                        .to_string()
-                        .map_err(|_| "Resposta CDP inválida".to_string())
-                        .and_then(|s| {
-                            serde_json::from_str(&s)
-                                .map_err(|_| "Resposta CDP inválida".to_string())
-                        })
+                    serde_json::from_str(&result).map_err(|_| "Resposta CDP inválida".to_string())
                 } else {
                     Err("Operação WebView2 recusada".into())
                 };
@@ -47,12 +46,17 @@ pub async fn cdp(w: &WebviewWindow, method: &str, params: Value) -> Result<Value
         }
     })
     .map_err(|_| "Página indisponível")?;
-    tokio::time::timeout(Duration::from_secs(45), rx)
+    tokio::time::timeout(Duration::from_secs(timeout), rx)
         .await
         .map_err(|_| "Timeout WebView2")?
         .map_err(|_| "Página encerrada")?
 }
 pub fn visibility(w: &WebviewWindow, visible: bool) {
+    let _ = w.eval(if visible {
+        "document.querySelectorAll('video,audio').forEach(v=>v.muted=false)"
+    } else {
+        "document.querySelectorAll('video,audio').forEach(v=>v.muted=true)"
+    });
     let _ = w.set_skip_taskbar(!visible);
     let _ = w.set_focusable(visible);
     let _ = w.set_ignore_cursor_events(!visible);
@@ -62,7 +66,7 @@ pub fn visibility(w: &WebviewWindow, visible: bool) {
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED.0 as isize);
             let _ = SetLayeredWindowAttributes(
                 hwnd,
-                windows::Win32::Foundation::COLORREF(0),
+                ::windows::Win32::Foundation::COLORREF(0),
                 if visible { 255 } else { 0 },
                 LWA_ALPHA,
             );
@@ -88,7 +92,7 @@ pub fn visibility(w: &WebviewWindow, visible: bool) {
 }
 pub fn keep_awake(app: &AppHandle, active: bool) {
     let _ = app.run_on_main_thread(move || unsafe {
-        use windows::Win32::System::Power::*;
+        use ::windows::Win32::System::Power::*;
         SetThreadExecutionState(if active {
             ES_CONTINUOUS | ES_SYSTEM_REQUIRED
         } else {
@@ -133,6 +137,7 @@ pub fn instrument(
     kind: &str,
     slug: Option<&str>,
     ticket: u64,
+    target_url: String,
 ) -> Result<(), String> {
     let _ = w.with_webview(|view| unsafe {
         if let Ok(core) = view.controller().CoreWebView2() {
@@ -147,6 +152,8 @@ pub fn instrument(
         }
     });
     if kind == "auth" {
+        w.navigate(target_url.parse().unwrap())
+            .map_err(|_| "Falha ao abrir login")?;
         return Ok(());
     }
     let slug = slug.unwrap().to_string();
@@ -300,10 +307,17 @@ pub fn instrument(
     }
     let window = w.clone();
     let is_player = kind == "player";
+    let owner_app = app.clone();
+    let owner_id = id.clone();
     tauri::async_runtime::spawn(async move {
         let _ = cdp(&window, "Network.enable", json!({})).await;
         if is_player {
             let _=cdp(&window,"Fetch.enable",json!({"patterns":[{"urlPattern":"*.m3u8*","requestStage":"Response"},{"resourceType":"Image","requestStage":"Request"},{"resourceType":"Font","requestStage":"Request"}]})).await;
+        }
+        if owner_app.state::<Runtime>().current(&owner_id, ticket) {
+            let _ = window.navigate(target_url.parse().unwrap());
+        } else {
+            let _ = window.destroy();
         }
     });
     Ok(())

@@ -127,7 +127,11 @@ pub async fn send(
             format!(
                 "PASS oauth:{}\r\nNICK {}\r\n",
                 c.token,
-                identity.username.to_lowercase()
+                identity
+                    .login
+                    .as_deref()
+                    .unwrap_or(&identity.username)
+                    .to_lowercase()
             )
             .into(),
         ))

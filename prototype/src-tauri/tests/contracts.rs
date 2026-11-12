@@ -8,6 +8,7 @@ fn identity(id: &str) -> Identity {
     Identity {
         id: id.into(),
         username: "fixture".into(),
+        login: None,
     }
 }
 #[test]
@@ -44,6 +45,7 @@ fn another_identity_cannot_inherit_points() {
 #[test]
 fn invalidation_rejects_pending_reply_and_snapshot_hides_private_data() {
     let mut a = account();
+    a.channels = vec!["alpha".into()];
     a.adopt_identity(identity("1"));
     a.set_balance("alpha", 900, 1);
     let ticket = a.ticket();
@@ -124,4 +126,88 @@ fn lowest_quality_is_a_real_variant_not_fabricated_160p() {
     assert!(result.contains("low.m3u8"));
     assert!(!result.contains("high.m3u8"));
     assert!(lowest_playlist("#EXTM3U\n#EXTINF:4\nsegment.ts\n").is_none());
+}
+#[test]
+fn invalid_session_does_not_reopen_manual_player() {
+    let mut a = account();
+    a.channels = vec!["alpha".into()];
+    a.adopt_identity(identity("1"));
+    a.status.insert(
+        "alpha".into(),
+        Channel {
+            live: true,
+            shown: true,
+            watching_since: Some(10),
+            ..Default::default()
+        },
+    );
+    a.invalidate();
+    assert!(a.desired(Platform::Kick, 20).is_empty());
+}
+#[test]
+fn chest_needs_both_balance_increase_and_claim_change() {
+    use terino_prototype::platform::chest_confirmed;
+    assert!(!chest_confirmed(100, 150, "old", Some("old")));
+    assert!(!chest_confirmed(100, 149, "old", None));
+    assert!(chest_confirmed(100, 150, "old", None));
+}
+#[test]
+fn twitch_playlist_never_selects_audio_only() {
+    let text="#EXTM3U\n#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID=\"low\"\n#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=1280x720\nhigh.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=123000,RESOLUTION=284x160\nlow.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=50000,VIDEO=\"audio_only\"\naudio.m3u8\n";
+    let result = lowest_playlist(text).unwrap();
+    assert!(result.contains("low.m3u8"));
+    assert!(!result.contains("audio.m3u8"));
+}
+#[test]
+fn selection_rejects_old_revision_and_previous_document() {
+    use terino_prototype::model::Selection;
+    let mut s = Selection::default();
+    let generation = s.generation;
+    assert!(s.select(2, generation, 2));
+    assert!(!s.select(1, generation, 1));
+    assert_eq!(s.index, 2);
+    s.new_document();
+    assert!(!s.select(3, generation, 999));
+    assert!(s.select(1, s.generation, 1));
+}
+#[test]
+fn partial_chest_response_cannot_confirm_claim() {
+    use terino_prototype::platform::confirmed_claim;
+    let mut v = json!({"data":{"currentUser":{"id":"1"},"channel":{"channel":{"self":{"communityPoints":{"balance":150,"availableClaim":null}}}}}});
+    assert!(confirmed_claim(&v, "id:1", 100, "old").is_some());
+    v["errors"] = json!([{"message":"partial"}]);
+    assert!(confirmed_claim(&v, "id:1", 100, "old").is_none());
+    v.as_object_mut().unwrap().remove("errors");
+    v["data"]["channel"]["channel"]["self"]["communityPoints"]
+        .as_object_mut()
+        .unwrap()
+        .remove("availableClaim");
+    assert!(confirmed_claim(&v, "id:1", 100, "old").is_none());
+}
+#[test]
+fn private_relationships_and_watch_time_do_not_survive_another_identity() {
+    let mut a = account();
+    a.channels = vec!["alpha".into()];
+    a.adopt_identity(identity("1"));
+    a.status.insert(
+        "alpha".into(),
+        Channel {
+            points: Some(900),
+            following: Some(true),
+            subscribed: true,
+            multiplier: 2.,
+            watched_ms: 120_000,
+            ..Default::default()
+        },
+    );
+    a.invalidate();
+    let s = a.snapshot(Platform::Twitch, 5);
+    let c = &s["channels"][0];
+    assert!(c["following"].is_null());
+    assert_eq!(c["subscribed"], false);
+    assert_eq!(c["watchedMin"], 0);
+    a.adopt_identity(identity("2"));
+    let s = a.snapshot(Platform::Twitch, 5);
+    assert!(s["channels"][0]["following"].is_null());
+    assert_eq!(s["channels"][0]["watchedMin"], 0);
 }

@@ -24,9 +24,12 @@ use tokio::sync::watch;
 struct Store {
     selected: usize,
     accounts: Vec<Account>,
+    #[serde(skip)]
+    ui: model::Selection,
 }
 pub struct Runtime {
     store: Mutex<Store>,
+    save_lock: Mutex<()>,
     pub root: PathBuf,
     pub platform: Platform,
     pub stopping: AtomicBool,
@@ -62,6 +65,9 @@ impl Runtime {
                 for (i, mut a) in saved.accounts.into_iter().take(4).enumerate() {
                     a.id = AccountId(format!("account-{}", i + 1));
                     a.max_watchers = a.max_watchers.clamp(1, 2);
+                    if a.logout_pending {
+                        a.used = false;
+                    }
                     a.channels
                         .retain(|s| model::valid_slug(s, Platform::current()));
                     a.channels.truncate(60);
@@ -75,7 +81,12 @@ impl Runtime {
             }
         }
         Self {
-            store: Mutex::new(Store { selected, accounts }),
+            store: Mutex::new(Store {
+                selected,
+                accounts,
+                ui: Default::default(),
+            }),
+            save_lock: Mutex::new(()),
             root,
             platform: Platform::current(),
             stopping: AtomicBool::new(false),
@@ -98,6 +109,25 @@ impl Runtime {
             && !self.suspended[id.index()].load(Ordering::SeqCst)
             && self.account(id, |a| a.current(t))
     }
+    pub fn apply_current<R>(
+        &self,
+        id: &AccountId,
+        t: u64,
+        f: impl FnOnce(&mut Account) -> R,
+    ) -> Option<R> {
+        self.account(id, |a| {
+            if !self.stopping.load(Ordering::SeqCst)
+                && !self.suspended[id.index()].load(Ordering::SeqCst)
+                && a.current(t)
+                && a.used
+                && !a.logout_pending
+            {
+                Some(f(a))
+            } else {
+                None
+            }
+        })
+    }
     pub fn invalidate(&self, id: &AccountId) {
         let t = self.account(id, |a| {
             a.invalidate();
@@ -106,12 +136,18 @@ impl Runtime {
         self.cancel[id.index()].send_replace(t);
     }
     pub fn snapshot(&self) -> Value {
+        let selected = self.store.lock().unwrap().selected;
+        self.snapshot_for(selected)
+    }
+    pub fn snapshot_for(&self, selected: usize) -> Value {
         let s = self.store.lock().unwrap();
-        let mut v = s.accounts[s.selected].snapshot(self.platform, model::now());
+        let mut v = s.accounts[selected].snapshot(self.platform, model::now());
         v["accounts"]=json!(s.accounts.iter().enumerate().map(|(i,a)|json!({"id":a.id.0,"label":format!("Conta {}",i+1),"username":if a.logged_in{a.identity.as_ref().map(|i|i.username.clone())}else{None},"loggedIn":a.logged_in,"sessionChecking":a.session_checking,"farming":a.farming,"watching":a.status.values().filter(|c|c.watching_since.is_some()).count(),"today":if a.logged_in{a.today}else{0}})).collect::<Vec<_>>());
+        v["uiGeneration"] = json!(s.ui.generation);
         v
     }
     pub fn save(&self) -> Result<(), String> {
+        let _save = self.save_lock.lock().unwrap();
         std::fs::create_dir_all(&self.root).map_err(|_| "Falha ao criar perfil de teste")?;
         let bytes = serde_json::to_vec_pretty(&*self.store.lock().unwrap())
             .map_err(|_| "Falha ao salvar configuração")?;
@@ -153,13 +189,22 @@ async fn select_account(
     window: WebviewWindow,
     state: State<'_, Runtime>,
     id: String,
+    revision: u64,
+    ui_generation: u64,
 ) -> Result<Value, String> {
     authorize(&window)?;
     let id = AccountId::parse(&id)?;
-    state.store.lock().unwrap().selected = id.index();
+    {
+        let mut store = state.store.lock().unwrap();
+        if !store.ui.select(id.index(), ui_generation, revision) {
+            return Err("Seleção antiga".into());
+        }
+        store.selected = id.index();
+    }
     state.save()?;
-    Ok(state.snapshot())
+    Ok(state.snapshot_for(id.index()))
 }
+
 fn argument<'a>(args: &'a [Value], n: usize) -> Result<&'a Value, String> {
     args.get(n).ok_or_else(|| "Argumento inválido".into())
 }
@@ -203,6 +248,9 @@ async fn account_command(
             result = Some(json!({"ok":true}));
         }
         "login:show" => {
+            if rt.account(&id, |a| a.logout_pending) {
+                logout(&app, &id).await?;
+            }
             rt.account(&id, |a| a.used = true);
             open_remote(&app, &id, "auth", None, true)?;
             rt.next_poll[id.index()].store(0, Ordering::SeqCst);
@@ -247,6 +295,22 @@ async fn account_command(
         "lowQuality:set" => {
             let on = flag(&args)?;
             rt.account(&id, |a| a.low_quality = on);
+            let slugs = rt.account(&id, |a| {
+                a.status
+                    .iter()
+                    .filter(|(_, c)| c.watching_since.is_some() && !c.shown)
+                    .map(|(s, _)| s.clone())
+                    .collect::<Vec<_>>()
+            });
+            for slug in slugs {
+                if let Some(w) = app.get_webview_window(&label(&id, "player", Some(&slug))) {
+                    let _ = w.navigate(
+                        format!("{}/{}", rt.platform.origin(), slug)
+                            .parse()
+                            .unwrap(),
+                    );
+                }
+            }
         }
         "autoChest:set" => {
             if rt.platform != Platform::Twitch {
@@ -254,6 +318,13 @@ async fn account_command(
             }
             let on = flag(&args)?;
             rt.account(&id, |a| a.auto_chest = on);
+            if !on {
+                for (l, w) in app.webview_windows() {
+                    if l.starts_with(&format!("{}-chest-", id.0)) {
+                        let _ = w.destroy();
+                    }
+                }
+            }
         }
         "maxWatchers:set" => {
             let n = argument(&args, 0)?
@@ -329,8 +400,7 @@ async fn account_command(
     rt.next_poll[id.index()].store(0, Ordering::SeqCst);
     reconcile(&app, &id)?;
     emit_state(&app);
-    let value =
-        result.unwrap_or_else(|| rt.account(&id, |a| a.snapshot(rt.platform, model::now())));
+    let value = result.unwrap_or_else(|| rt.snapshot_for(id.index()));
     Ok(json!({"accountId":id.0,"result":value}))
 }
 pub fn label(id: &AccountId, kind: &str, slug: Option<&str>) -> String {
@@ -391,6 +461,14 @@ pub fn open_remote(
     visible: bool,
 ) -> Result<WebviewWindow, String> {
     let rt = app.state::<Runtime>();
+    let owner_ticket = rt.account(id, |a| a.ticket());
+    if kind != "auth"
+        && !rt.account(id, |a| {
+            a.current(owner_ticket) && a.logged_in && a.used && !a.logout_pending
+        })
+    {
+        return Err("Sessão indisponível".into());
+    }
     let name = label(id, kind, slug);
     if let Some(w) = app.get_webview_window(&name) {
         if visible {
@@ -453,11 +531,11 @@ pub fn open_remote(
     let app_popup = app.clone();
     let id_popup = id.clone();
     let popup_dir = dir.clone();
-    let builder=WebviewWindowBuilder::new(app,&name,WebviewUrl::External(url.parse().unwrap()))
+    let builder=WebviewWindowBuilder::new(app,&name,WebviewUrl::External("about:blank".parse().unwrap()))
         .title(format!("{} — {} — {}",rt.platform.name(),id.0,slug.unwrap_or("Login")))
         .data_directory(dir).additional_browser_args("--autoplay-policy=no-user-gesture-required --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows")
         .inner_size(if kind=="player"{480.}else{1000.},if kind=="player"{270.}else{800.}).visible(false)
-        .on_navigation(|u|u.scheme()=="https")
+        .on_navigation(|u|u.scheme()=="https"||u.as_str()=="about:blank")
         .on_new_window(move|url,features|{
             if url.scheme()!="https"{return tauri::webview::NewWindowResponse::Deny}
             let n=format!("{}-popup-{}",id_popup.0,model::now());
@@ -466,8 +544,12 @@ pub fn open_remote(
     let w = builder
         .build()
         .map_err(|_| "Falha ao criar página oficial")?;
-    let ticket = rt.account(id, |a| a.ticket());
-    webview::instrument(&w, app, id, kind, slug, ticket)?;
+    let ticket = owner_ticket;
+    if kind != "auth" && !rt.current(id, ticket) {
+        let _ = w.destroy();
+        return Err("Sessão alterada".into());
+    }
+    webview::instrument(&w, app, id, kind, slug, ticket, url)?;
     if kind == "player" {
         rt.account(id, |a| {
             let c = a.status.entry(slug.unwrap().into()).or_default();
@@ -480,6 +562,10 @@ pub fn open_remote(
     let k = kind.to_owned();
     let s = slug.map(String::from);
     let win = w.clone();
+    let started = rt.account(id, |a| {
+        slug.and_then(|s| a.status.get(s))
+            .and_then(|c| c.watching_since)
+    });
     w.on_window_event(move |event| {
         let rt = app_close.state::<Runtime>();
         if let WindowEvent::CloseRequested { api, .. } = event {
@@ -503,6 +589,13 @@ pub fn open_remote(
                         }
                     });
                     webview::visibility(&win, false);
+                    if rt.account(&id_close, |a| a.low_quality) {
+                        let _ = win.navigate(
+                            format!("{}/{}", rt.platform.origin(), s.as_ref().unwrap())
+                                .parse()
+                                .unwrap(),
+                        );
+                    }
                 }
             }
         }
@@ -510,7 +603,8 @@ pub fn open_remote(
             if let Some(s) = s.as_ref() {
                 if k == "player" {
                     rt.account(&id_close, |a| {
-                        if let Some(c) = a.status.get_mut(s) {
+                        if let Some(c) = a.status.get_mut(s).filter(|c| c.watching_since == started)
+                        {
                             c.watched_ms += c
                                 .watching_since
                                 .take()
@@ -534,16 +628,42 @@ pub fn open_remote(
     Ok(w)
 }
 pub fn close_players(app: &AppHandle, id: &AccountId) {
+    let rt = app.state::<Runtime>();
+    rt.account(id, |a| {
+        for c in a.status.values_mut() {
+            c.watched_ms += c
+                .watching_since
+                .take()
+                .map(|t| model::now().saturating_sub(t))
+                .unwrap_or(0);
+            c.shown = false;
+        }
+    });
     for (l, w) in app.webview_windows() {
         if l.starts_with(&format!("{}-", id.0)) && !l.ends_with("-auth") {
             let _ = w.destroy();
         }
     }
+    let active =
+        rt.store.lock().unwrap().accounts.iter().any(|a| {
+            a.logged_in && a.farming && a.status.values().any(|c| c.watching_since.is_some())
+        });
+    webview::keep_awake(app, active);
 }
 async fn logout(app: &AppHandle, id: &AccountId) -> Result<(), String> {
     let rt = app.state::<Runtime>();
     rt.suspended[id.index()].store(true, Ordering::SeqCst);
     rt.invalidate(id);
+    rt.account(id, |a| {
+        a.used = false;
+        a.logout_pending = true;
+        a.identity = None;
+        a.today = 0;
+        a.chests = 0;
+    });
+    close_players(app, id);
+    let _ = rt.save();
+    emit_state(app);
     let cleanup = async {
         let w = if let Some(w) = slot_window(app, id) {
             w
@@ -570,23 +690,16 @@ async fn logout(app: &AppHandle, id: &AccountId) -> Result<(), String> {
         Ok::<(), String>(())
     }
     .await;
-    if cleanup.is_ok() {
-        for (l, w) in app.webview_windows() {
-            if l.starts_with(&format!("{}-", id.0)) {
-                let _ = w.destroy();
-            }
+    for (l, w) in app.webview_windows() {
+        if l.starts_with(&format!("{}-", id.0)) {
+            let _ = w.destroy();
         }
-        rt.account(id, |a| {
-            a.used = false;
-            a.identity = None;
-            a.status.clear();
-            a.today = 0;
-            a.chests = 0;
-            a.session_checking = false;
-        });
-        rt.digests.lock().unwrap()[id.index()] = None;
     }
+    rt.account(id,|a|{a.status.clear();a.session_checking=false;a.logout_pending=cleanup.is_err();a.error=cleanup.as_ref().err().map(|_|"Saída incompleta. Ao entrar novamente, o app tentará limpar o perfil antes do login.".into());});
+    rt.digests.lock().unwrap()[id.index()] = None;
+    let _ = rt.save();
     rt.suspended[id.index()].store(false, Ordering::SeqCst);
+    emit_state(app);
     cleanup
 }
 pub fn reconcile(app: &AppHandle, id: &AccountId) -> Result<(), String> {
@@ -660,26 +773,55 @@ impl Drop for PollGuard<'_> {
         self.0.store(false, Ordering::SeqCst);
     }
 }
-async fn poll_account(app: AppHandle, id: AccountId, c: Credentials) {
+async fn poll_account(app: AppHandle, id: AccountId, c: Credentials, ticket: u64) {
     let rt = app.state::<Runtime>();
     if rt.polling[id.index()].swap(true, Ordering::SeqCst) {
         return;
     }
     let _guard = PollGuard(&rt.polling[id.index()]);
-    let ticket = rt.account(&id, |a| a.ticket());
     let mut cancel = rt.cancel[id.index()].subscribe();
+    if !rt.current(&id, ticket) || !rt.account(&id, |a| a.used) {
+        return;
+    }
+    let fingerprint = c.fingerprint();
     let work = async {
-        let identity = platform::identity(rt.platform, &c).await?;
-        if !rt.current(&id, ticket) {
+        let identity = match platform::identity(rt.platform, &c).await {
+            Ok(i) => i,
+            Err(e) => {
+                if rt.current(&id, ticket) {
+                    rt.account(&id, |a| a.logged_in = false);
+                    close_players(&app, &id);
+                }
+                return Err(e);
+            }
+        };
+        if !rt.current(&id, ticket)
+            || credentials(&app, &id)
+                .map(|v| v.fingerprint())
+                .ok()
+                .as_ref()
+                != Some(&fingerprint)
+        {
             return Err("Sessão alterada".into());
         }
-        rt.account(&id, |a| a.adopt_identity(identity));
+        if rt
+            .apply_current(&id, ticket, |a| a.adopt_identity(identity))
+            .is_none()
+        {
+            return Err("Sessão alterada".into());
+        }
         let slugs = rt.account(&id, |a| a.channels.clone());
         let rows = platform::channels(rt.platform, &c, &slugs).await?;
-        if !rt.current(&id, ticket) {
+        if !rt.current(&id, ticket)
+            || credentials(&app, &id)
+                .map(|v| v.fingerprint())
+                .ok()
+                .as_ref()
+                != Some(&fingerprint)
+        {
             return Err("Sessão alterada".into());
         }
-        rt.account(&id, |a| {
+        rt.apply_current(&id, ticket, |a| {
             for (s, mut ch) in rows {
                 if !a.channels.contains(&s) {
                     continue;
@@ -693,6 +835,8 @@ async fn poll_account(app: AppHandle, id: AccountId, c: Credentials) {
                 ch.shown = old.shown;
                 ch.last_gain = old.last_gain;
                 ch.cooldown_until = old.cooldown_until;
+                ch.inspection_failures = old.inspection_failures;
+                ch.chest_error = old.chest_error.clone();
                 a.status.insert(s.clone(), ch);
                 if let Some(p) = points {
                     a.set_balance(&s, p, model::now());
@@ -700,7 +844,8 @@ async fn poll_account(app: AppHandle, id: AccountId, c: Credentials) {
             }
             a.error = None;
             a.session_checking = false;
-        });
+        })
+        .ok_or("Sessão alterada")?;
         reconcile(&app, &id)?;
         crate::chest::schedule(&app, &id);
         Ok::<(), String>(())
@@ -708,7 +853,7 @@ async fn poll_account(app: AppHandle, id: AccountId, c: Credentials) {
     let result = tokio::select! {v=work=>v,_=cancel.changed()=>return};
     if rt.current(&id, ticket) {
         if let Err(e) = result {
-            rt.account(&id, |a| {
+            rt.apply_current(&id, ticket, |a| {
                 a.session_checking = false;
                 a.error = Some(e.clone());
                 for s in &a.channels {
@@ -719,65 +864,81 @@ async fn poll_account(app: AppHandle, id: AccountId, c: Credentials) {
     }
     emit_state(&app);
 }
+fn tick_account(app: &AppHandle, id: &AccountId) {
+    let rt = app.state::<Runtime>();
+    if rt.stopping.load(Ordering::SeqCst) || rt.suspended[id.index()].load(Ordering::SeqCst) {
+        return;
+    }
+    let (used, before) = rt.account(id, |a| (a.used && !a.logout_pending, a.ticket()));
+    if !used {
+        return;
+    }
+    if slot_window(app, id).is_none() {
+        let _ = open_remote(app, id, "auth", None, false);
+    }
+    let Ok(c) = credentials(app, id) else { return };
+    if !rt.current(id, before) {
+        return;
+    }
+    let fingerprint = c.fingerprint();
+    let changed = {
+        let mut d = rt.digests.lock().unwrap();
+        let changed = d[id.index()].as_ref() != Some(&fingerprint);
+        if changed {
+            d[id.index()] = Some(fingerprint);
+        }
+        changed
+    };
+    let ticket = if changed {
+        let next = rt.account(id, |a| {
+            if a.current(before) && a.used && !a.logout_pending {
+                a.invalidate();
+                Some(a.ticket())
+            } else {
+                None
+            }
+        });
+        let Some(next) = next else { return };
+        rt.cancel[id.index()].send_replace(next);
+        close_players(app, id);
+        rt.next_poll[id.index()].store(0, Ordering::SeqCst);
+        next
+    } else {
+        before
+    };
+    if !rt.current(id, ticket) || !rt.account(id, |a| a.used) {
+        return;
+    }
+    if c.token.is_empty() {
+        rt.account(id, |a| {
+            a.logged_in = false;
+            a.session_checking = false;
+        });
+        emit_state(app);
+    } else if model::now() >= rt.next_poll[id.index()].load(Ordering::SeqCst) {
+        rt.next_poll[id.index()].store(model::now() + 60_000, Ordering::SeqCst);
+        let app = app.clone();
+        let id = id.clone();
+        tauri::async_runtime::spawn(async move {
+            poll_account(app, id, c, ticket).await;
+        });
+    }
+}
 fn start_tasks(app: &AppHandle) {
     for n in 1..=4 {
         let app = app.clone();
         let id = AccountId(format!("account-{n}"));
         tauri::async_runtime::spawn(async move {
-            let mut first = true;
+            let a = app.clone();
+            let i = id.clone();
+            tauri::async_runtime::spawn(async move {
+                crate::chat::receive(a, i).await;
+            });
             loop {
-                let rt = app.state::<Runtime>();
-                if rt.stopping.load(Ordering::SeqCst) {
+                if app.state::<Runtime>().stopping.load(Ordering::SeqCst) {
                     break;
                 }
-                if rt.suspended[id.index()].load(Ordering::SeqCst) {
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    continue;
-                }
-                let used = rt.account(&id, |a| a.used);
-                if used {
-                    if slot_window(&app, &id).is_none() {
-                        let _ = open_remote(&app, &id, "auth", None, false);
-                    }
-                    if let Ok(c) = credentials(&app, &id) {
-                        let fingerprint = c.fingerprint();
-                        let changed = {
-                            let mut d = rt.digests.lock().unwrap();
-                            let changed = d[id.index()].as_ref() != Some(&fingerprint);
-                            if changed {
-                                d[id.index()] = Some(fingerprint);
-                            }
-                            changed
-                        };
-                        if changed {
-                            rt.invalidate(&id);
-                            close_players(&app, &id);
-                            rt.next_poll[id.index()].store(0, Ordering::SeqCst);
-                        }
-                        if c.token.is_empty() {
-                            rt.account(&id, |a| {
-                                a.logged_in = false;
-                                a.session_checking = false;
-                            });
-                            emit_state(&app);
-                        } else if model::now() >= rt.next_poll[id.index()].load(Ordering::SeqCst) {
-                            rt.next_poll[id.index()].store(model::now() + 60_000, Ordering::SeqCst);
-                            let a = app.clone();
-                            let i = id.clone();
-                            tauri::async_runtime::spawn(async move {
-                                poll_account(a, i, c).await;
-                            });
-                        }
-                    }
-                }
-                if first {
-                    first = false;
-                    let a = app.clone();
-                    let i = id.clone();
-                    tauri::async_runtime::spawn(async move {
-                        crate::chat::receive(a, i).await;
-                    });
-                }
+                tick_account(&app, &id);
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
         });
@@ -800,6 +961,13 @@ pub fn run() {
                 let _ = w.set_focus();
             }
         }))
+        .on_page_load(|w, p| {
+            if w.label() == "main" && matches!(p.event(), tauri::webview::PageLoadEvent::Started) {
+                if let Some(rt) = w.try_state::<Runtime>() {
+                    rt.store.lock().unwrap().ui.new_document();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             snapshot,
             select_account,

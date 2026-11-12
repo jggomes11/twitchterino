@@ -27,3 +27,8 @@ test('persisted selection owns the first command after restart',async()=>{
   const calls=[];const bridge=createBridge(async(command,args)=>{calls.push({command,args});return command==='snapshot'?{accountId:'account-3'}:{result:{ok:true}};},async()=>()=>{});
   await bridge.getState();await bridge.addChannel('alpha');assert.equal(calls[1].args.id,'account-3');
 });
+test('numeric values from HTML controls reach native code as numbers',async()=>{
+  const calls=[];const bridge=createBridge(async(c,a)=>{calls.push(a);return {result:{ok:true}};},async()=>()=>{});
+  await bridge.setMaxWatchers('2');await bridge.setBonusTarget('300');
+  assert.equal(calls[0].args[0],2);assert.equal(calls[1].args[0],300);
+});

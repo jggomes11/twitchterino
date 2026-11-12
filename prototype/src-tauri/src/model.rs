@@ -47,6 +47,7 @@ impl AccountId {
 pub struct Identity {
     pub id: String,
     pub username: String,
+    pub login: Option<String>,
 }
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -80,6 +81,8 @@ pub struct Channel {
     pub last_gain: Option<u64>,
     pub cooldown_until: u64,
     pub age_gate: bool,
+    pub chest_error: Option<String>,
+    pub inspection_failures: u8,
 }
 impl Channel {
     pub fn costs(&self) -> [u64; 3] {
@@ -169,6 +172,7 @@ pub struct Account {
     pub favorites: Vec<String>,
     pub auto_chest: bool,
     pub used: bool,
+    pub logout_pending: bool,
     #[serde(skip)]
     pub identity: Option<Identity>,
     #[serde(skip)]
@@ -204,6 +208,7 @@ impl Account {
             favorites: vec![],
             auto_chest: true,
             used: false,
+            logout_pending: false,
             identity: None,
             logged_in: false,
             session_checking: false,
@@ -232,6 +237,14 @@ impl Account {
                 c.gained = 0;
                 c.last_gain = None;
                 c.claim = None;
+                c.following = None;
+                c.subscribed = false;
+                c.multiplier = 1.;
+                c.watched_ms = 0;
+                c.watching_since = None;
+                c.shown = false;
+                c.cooldown_until = 0;
+                c.chest_error = None;
             }
             self.today = 0;
             self.chests = 0;
@@ -263,7 +276,10 @@ impl Account {
             .filter(|s| self.status.get(*s).is_some_and(|c| c.shown))
             .cloned()
             .collect();
-        if !self.farming || !self.logged_in {
+        if !self.logged_in {
+            return vec![];
+        }
+        if !self.farming {
             return chosen;
         }
         let mut candidates: Vec<_> = self
@@ -335,7 +351,7 @@ impl Account {
     pub fn snapshot(&self, p: Platform, now: u64) -> Value {
         let channels:Vec<_>=self.channels.iter().map(|s|{
             let c=self.status.get(s).cloned().unwrap_or_default();let known=self.logged_in && c.points.is_some();let(_,goal,left)=c.rank(&self.bonus_target);let costs=c.costs();let earning=c.earning(now);
-            json!({"slug":s,"displayName":if c.display_name.is_empty(){s.clone()}else{c.display_name},"avatar":c.avatar,"live":c.live,"viewers":c.viewers,"title":c.title,"chatroomId":if p==Platform::Twitch {Some(s.clone())}else{c.chatroom},"points":if known{c.points}else{None},"watching":c.watching_since.is_some(),"ageGate":c.age_gate,"earning":earning,"following":c.following,"subscribed":c.subscribed,"multiplier":if c.multiplier>0.{c.multiplier}else{1.},"gained":if known{c.gained}else{0},"goal":if known{Some(goal)}else{None},"goalLeft":if known{Some(left)}else{None},"costs":{"xp":costs[0],"capture":costs[1],"lure":costs[2]},"targetCost":goal.saturating_sub(c.points.unwrap_or(0)/goal.max(1)*goal),"hasBonus":c.rewards.iter().any(|r|r.available),"rewardsLoaded":true,"rewards":c.rewards.iter().filter(|r|r.available).collect::<Vec<_>>(),"chest":self.logged_in&&c.claim.is_some(),"chestState":null,"chestError":null,"priceChange":null,"pointsEnabled":c.points_enabled,"watchedMin":(c.watched_ms+c.watching_since.map(|t|now.saturating_sub(t)).unwrap_or(0))/60000,"error":c.error})
+            json!({"slug":s,"displayName":if c.display_name.is_empty(){s.clone()}else{c.display_name},"avatar":c.avatar,"live":c.live,"viewers":c.viewers,"title":c.title,"chatroomId":if p==Platform::Twitch {Some(s.clone())}else{c.chatroom},"points":if known{c.points}else{None},"watching":c.watching_since.is_some(),"ageGate":c.age_gate,"earning":earning,"following":if known{c.following}else{None},"subscribed":known&&c.subscribed,"multiplier":if known&&c.multiplier>0.{c.multiplier}else{1.},"gained":if known{c.gained}else{0},"goal":if known{Some(goal)}else{None},"goalLeft":if known{Some(left)}else{None},"costs":{"xp":costs[0],"capture":costs[1],"lure":costs[2]},"targetCost":goal.saturating_sub(c.points.unwrap_or(0)/goal.max(1)*goal),"hasBonus":c.rewards.iter().any(|r|r.available),"rewardsLoaded":true,"rewards":c.rewards.iter().filter(|r|r.available).collect::<Vec<_>>(),"chest":self.logged_in&&c.claim.is_some(),"chestState":if self.auto_chest&&c.chest_error.is_some(){Some("retry")}else{None},"chestError":c.chest_error,"priceChange":null,"pointsEnabled":c.points_enabled,"watchedMin":if self.logged_in{(c.watched_ms+c.watching_since.map(|t|now.saturating_sub(t)).unwrap_or(0))/60000}else{0},"error":c.error})
         }).collect();
         json!({"accountId":self.id.0,"farming":self.farming,"watchAll":false,"maxWatchers":self.max_watchers,"lowQuality":self.low_quality,"rotation":self.rotation,"bonusTarget":if self.bonus_target.is_null(){if p==Platform::Twitch{json!("")}else{json!(0)}}else{self.bonus_target.clone()},"bonusOptions":[],"openAtLogin":false,"platform":"win32","notifyBonus":false,"notifyChat":false,"notifyChest":false,"autoChest":self.auto_chest,"favorites":self.favorites,"username":if self.logged_in{self.identity.as_ref().map(|i|i.username.clone())}else{None},"loggedIn":self.logged_in,"sessionChecking":self.session_checking,"version":"0.1.0-prototype","intro":null,"today":if self.logged_in{self.today}else{0},"chestsToday":if self.logged_in{self.chests}else{0},"bonuses":[],"purchases":[],"storeSequence":null,"channels":channels,"memoryMB":null,"prototype":true,"error":self.error})
     }
@@ -355,4 +371,25 @@ pub fn valid_slug(s: &str, p: Platform) -> bool {
                 || c == b'_'
                 || (p == Platform::Kick && c == b'-')
         })
+}
+
+#[derive(Default)]
+pub struct Selection {
+    pub index: usize,
+    pub generation: u64,
+    pub revision: u64,
+}
+impl Selection {
+    pub fn select(&mut self, index: usize, generation: u64, revision: u64) -> bool {
+        if index > 3 || generation != self.generation || revision <= self.revision {
+            return false;
+        }
+        self.index = index;
+        self.revision = revision;
+        true
+    }
+    pub fn new_document(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.revision = 0;
+    }
 }

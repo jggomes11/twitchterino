@@ -53,11 +53,18 @@ pub async fn request(
     if !valid_endpoint(p, path, method) {
         return Err("Consulta inválida".into());
     }
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| "Transporte indisponível")?;
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> =
+        std::sync::OnceLock::new();
+    let client = CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(20))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|_| "Transporte indisponível".into())
+        })
+        .as_ref()
+        .map_err(Clone::clone)?;
     let url = if p == Platform::Twitch {
         "https://gql.twitch.tv/gql".into()
     } else {
@@ -149,6 +156,7 @@ pub fn parse_kick_identity(v: &Value) -> Option<Identity> {
     Some(Identity {
         id: format!("id:{id}"),
         username: name.into(),
+        login: None,
     })
 }
 pub async fn identity(p: Platform, c: &Credentials) -> Result<Identity, String> {
@@ -177,6 +185,7 @@ pub async fn identity(p: Platform, c: &Credentials) -> Result<Identity, String> 
         Ok(Identity {
             id,
             username: u["displayName"].as_str().unwrap_or(login).into(),
+            login: Some(login.into()),
         })
     } else {
         let mut err = "Sessão não confirmada".into();
@@ -289,7 +298,19 @@ pub async fn channels(
         }
     } else {
         for s in slugs {
-            let v = request(p, &format!("/api/v2/channels/{s}"), "GET", c, None).await?;
+            let v = match request(p, &format!("/api/v2/channels/{s}"), "GET", c, None).await {
+                Ok(v) => v,
+                Err(e) => {
+                    result.push((
+                        s.clone(),
+                        Channel {
+                            error: Some(e),
+                            ..Default::default()
+                        },
+                    ));
+                    continue;
+                }
+            };
             let mut ch = Channel {
                 display_name: v["user"]["username"].as_str().unwrap_or(s).into(),
                 live: !v["livestream"].is_null(),
@@ -304,7 +325,7 @@ pub async fn channels(
             };
             if let Ok(v) = request(p, &format!("/api/v2/channels/{s}/me"), "GET", c, None).await {
                 ch.following = v["is_following"].as_bool();
-                ch.subscribed = !v["subscription"].is_null();
+                ch.subscribed = !v["subscription"].is_null() && v["subscription"] != false;
             }
             match request(p, &format!("/api/v2/channels/{s}/points"), "GET", c, None).await {
                 Ok(v) => {
@@ -346,6 +367,10 @@ pub fn lowest_playlist(text: &str) -> Option<String> {
             i += 1;
         }
     }
+    if variants.iter().any(|v| v.1.contains("RESOLUTION=")) {
+        variants
+            .retain(|v| v.1.contains("RESOLUTION=") && !v.1.to_lowercase().contains("audio_only"));
+    }
     if variants.len() < 2 {
         return None;
     }
@@ -357,4 +382,44 @@ pub fn lowest_playlist(text: &str) -> Option<String> {
 }
 pub fn chest_confirmed(before: u64, after: u64, old: &str, new: Option<&str>) -> bool {
     after >= before.saturating_add(50) && new != Some(old)
+}
+
+pub fn confirmed_claim(
+    v: &Value,
+    expected: &str,
+    before: u64,
+    old: &str,
+) -> Option<(u64, Option<String>)> {
+    if let Some(errors) = v.get("errors") {
+        if !errors.as_array().is_some_and(|e| e.is_empty()) {
+            return None;
+        }
+    }
+    let user = v.pointer("/data/currentUser")?;
+    let id = user["id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("id:{s}"))
+        .or_else(|| {
+            user["login"]
+                .as_str()
+                .map(|s| format!("login:{}", s.to_lowercase()))
+        })?;
+    if id != expected {
+        return None;
+    }
+    let cp = v
+        .pointer("/data/channel/channel/self/communityPoints")?
+        .as_object()?;
+    let balance = cp.get("balance")?.as_u64()?;
+    let claim = match cp.get("availableClaim")? {
+        Value::Null => None,
+        Value::Object(o) => Some(o.get("id")?.as_str().filter(|s| !s.is_empty())?.to_string()),
+        _ => return None,
+    };
+    if chest_confirmed(before, balance, old, claim.as_deref()) {
+        Some((balance, claim))
+    } else {
+        None
+    }
 }

@@ -18,12 +18,12 @@ pub fn schedule(app: &AppHandle, id: &AccountId) {
     if rt.platform != Platform::Twitch || rt.chest_busy[id.index()].swap(true, Ordering::SeqCst) {
         return;
     }
+    let ticket = rt.account(id, |a| a.ticket());
     let app = app.clone();
     let id = id.clone();
     tauri::async_runtime::spawn(async move {
         let rt = app.state::<Runtime>();
         let _busy = Busy(&rt.chest_busy[id.index()]);
-        let ticket = rt.account(&id, |a| a.ticket());
         let mut cancel = rt.cancel[id.index()].subscribe();
         let work = async {
             let claims = rt.account(&id, |a| {
@@ -67,7 +67,8 @@ pub fn schedule(app: &AppHandle, id: &AccountId) {
                 if result.is_err() && rt.current(&id, ticket) {
                     rt.account(&id, |a| {
                         if let Some(c) = a.status.get_mut(&slug) {
-                            c.error = Some("Baú não confirmado; nova tentativa depois".into());
+                            c.chest_error =
+                                Some("Baú não confirmado; nova tentativa depois".into());
                         }
                     });
                 }
@@ -100,7 +101,7 @@ async fn claim_one(
     // Navigation may still be in progress. Retry only the restricted bonus selector on the fixed page.
     let mut clicked = false;
     for _ in 0..4 {
-        if !rt.current(id, ticket) {
+        if !rt.current(id, ticket) || !rt.account(id, |a| a.auto_chest) {
             return Err("Sessão alterada".into());
         }
         let v = webview::cdp(
@@ -131,24 +132,22 @@ async fn claim_one(
             Some(json!({"query":query})),
         )
         .await?;
-        let uid = v
-            .pointer("/data/currentUser/id")
-            .and_then(Value::as_str)
-            .map(|s| format!("id:{s}"));
-        let cp = &v["data"]["channel"]["channel"]["self"]["communityPoints"];
-        if rt.current(id, ticket)
-            && uid.as_deref() == Some(&identity.id)
-            && cp["balance"].as_u64().is_some_and(|after| {
-                platform::chest_confirmed(before, after, claim, cp["availableClaim"]["id"].as_str())
-            })
+        if let Some((balance, new_claim)) =
+            platform::confirmed_claim(&v, &identity.id, before, claim)
         {
-            rt.account(id, |a| {
-                a.set_balance(slug, cp["balance"].as_u64().unwrap(), model::now());
-                a.chests += 1;
-                if let Some(s) = a.status.get_mut(slug) {
-                    s.claim = cp["availableClaim"]["id"].as_str().map(String::from);
-                }
-            });
+            if rt
+                .apply_current(id, ticket, |a| {
+                    a.set_balance(slug, balance, model::now());
+                    a.chests += 1;
+                    if let Some(s) = a.status.get_mut(slug) {
+                        s.claim = new_claim;
+                        s.chest_error = None;
+                    }
+                })
+                .is_none()
+            {
+                return Err("Sessão alterada".into());
+            }
             let mut ids = rt.confirmed.lock().unwrap();
             let ids = &mut ids[id.index()];
             ids.push(claim.into());
