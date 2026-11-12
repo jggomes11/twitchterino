@@ -11,14 +11,15 @@
       const result=reply?.result;
       return result && typeof result==='object'?{...result,accountId:id}:result;
     };
+    const showError=state=>{if(typeof document==='undefined')return;const node=document.querySelector('#account-hint');if(node){node.dataset.hint ||= node.textContent;node.textContent=state.error?`${node.dataset.hint} — ${state.error}`:node.dataset.hint;}};
     const event=(name,callback)=>{void listen(name,e=>{
       const m=e.payload;if(!m||m.accountId!==selected)return;
-      callback(name==='status'?m:m.payload,m.accountId);
+      if(name==='status')showError(m);callback(name==='status'?m:m.payload,m.accountId);
     });};
     const unsupported=()=>Promise.reject(new Error('Função fora do escopo deste protótipo.'));
     return Object.freeze({
       selectAccount:async id=>{if(!valid(id))throw new Error('Conta inválida');initialized=true;selected=id;const revision=++epoch;const initialState=await initialize();return invoke('select_account',{id,revision,uiGeneration:initialState?.uiGeneration||0});},
-      getState:async()=>{const state=await initialize();if(!initialized&&valid(state.accountId)){selected=state.accountId;initialized=true;}return state;},
+      getState:async()=>{const state=await initialize();showError(state);if(!initialized&&valid(state.accountId)){selected=state.accountId;initialized=true;}return state;},
       addChannel:slug=>call('channels:add',slug),removeChannel:slug=>call('channels:remove',slug),
       setFarming:on=>call('farming:set',on),setMaxWatchers:n=>call('maxWatchers:set',Number(n)),
       setRotation:on=>call('rotation:set',on),setBonusTarget:kind=>call('bonusTarget:set',typeof kind==='string'&&/^(0|300|500|1000)$/.test(kind)?Number(kind):kind),

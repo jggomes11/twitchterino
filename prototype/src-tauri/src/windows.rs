@@ -30,6 +30,9 @@ struct Store {
 pub struct Runtime {
     store: Mutex<Store>,
     save_lock: Mutex<()>,
+    observe_lock: Mutex<()>,
+    pub observation: AtomicU64,
+    pub engine: Mutex<Option<Value>>,
     pub root: PathBuf,
     pub platform: Platform,
     pub stopping: AtomicBool,
@@ -87,6 +90,9 @@ impl Runtime {
                 ui: Default::default(),
             }),
             save_lock: Mutex::new(()),
+            observe_lock: Mutex::new(()),
+            observation: AtomicU64::new(1),
+            engine: Mutex::new(None),
             root,
             platform: Platform::current(),
             stopping: AtomicBool::new(false),
@@ -135,6 +141,9 @@ impl Runtime {
         });
         self.cancel[id.index()].send_replace(t);
     }
+    pub fn is_selected(&self, id: &AccountId) -> bool {
+        self.store.lock().unwrap().selected == id.index()
+    }
     pub fn snapshot(&self) -> Value {
         let selected = self.store.lock().unwrap().selected;
         self.snapshot_for(selected)
@@ -145,6 +154,29 @@ impl Runtime {
         v["accounts"]=json!(s.accounts.iter().enumerate().map(|(i,a)|json!({"id":a.id.0,"label":format!("Conta {}",i+1),"username":if a.logged_in{a.identity.as_ref().map(|i|i.username.clone())}else{None},"loggedIn":a.logged_in,"sessionChecking":a.session_checking,"farming":a.farming,"watching":a.status.values().filter(|c|c.watching_since.is_some()).count(),"today":if a.logged_in{a.today}else{0}})).collect::<Vec<_>>());
         v["uiGeneration"] = json!(s.ui.generation);
         v
+    }
+    pub fn observe(&self, id: &AccountId, kind: &str, data: Value) {
+        use std::io::Write;
+        let _guard = self.observe_lock.lock().unwrap();
+        let dir = self.root.join(&id.0);
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("observations.jsonl");
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > 5 * 1024 * 1024) {
+            let old = dir.join("observations.old.jsonl");
+            let _ = std::fs::remove_file(&old);
+            let _ = std::fs::rename(&path, old);
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(
+                f,
+                "{}",
+                json!({"utc":chrono::Utc::now().to_rfc3339(),"accountId":id.0,"kind":kind,"engine":self.engine.lock().unwrap().clone(),"data":data})
+            );
+        }
     }
     pub fn save(&self) -> Result<(), String> {
         let _save = self.save_lock.lock().unwrap();
@@ -171,7 +203,12 @@ pub fn toast(app: &AppHandle, id: &AccountId, message: &str) {
 fn authorize(w: &WebviewWindow) -> Result<(), String> {
     let u = w.url().map_err(|_| "Origem inválida")?;
     if w.label() == "main"
-        && (u.scheme() == "tauri" || u.host_str() == Some("tauri.localhost"))
+        && ((u.scheme() == "tauri" && u.host_str() == Some("localhost"))
+            || (matches!(u.scheme(), "http" | "https") && u.host_str() == Some("tauri.localhost")))
+        && u.port().is_none()
+        && u.username().is_empty()
+        && u.password().is_none()
+        && u.query().is_none()
         && matches!(u.path(), "/" | "/index.html")
     {
         Ok(())
@@ -212,6 +249,36 @@ fn flag(args: &[Value]) -> Result<bool, String> {
     argument(args, 0)?
         .as_bool()
         .ok_or_else(|| "Valor booleano obrigatório".into())
+}
+fn verified_credentials(
+    app: &AppHandle,
+    id: &AccountId,
+    ticket: u64,
+) -> Result<Credentials, String> {
+    let rt = app.state::<Runtime>();
+    if !rt.current(id, ticket) || !rt.account(id, |a| a.logged_in) {
+        return Err("Aguarde a confirmação da conta".into());
+    }
+    let c = credentials(app, id)?;
+    let matches = rt.digests.lock().unwrap()[id.index()].as_ref() == Some(&c.fingerprint());
+    if !matches {
+        let changed = rt.account(id, |a| {
+            if a.current(ticket) {
+                a.invalidate();
+                Some(a.ticket())
+            } else {
+                None
+            }
+        });
+        if let Some(next) = changed {
+            rt.cancel[id.index()].send_replace(next);
+            close_for_ticket(app, id, next);
+            rt.next_poll[id.index()].store(0, Ordering::SeqCst);
+            emit_state(app);
+        }
+        return Err("Sessão alterada. Aguarde a confirmação da conta.".into());
+    }
+    Ok(c)
 }
 fn channel_arg(rt: &Runtime, id: &AccountId, args: &[Value]) -> Result<String, String> {
     let s = argument(args, 0)?
@@ -365,6 +432,8 @@ async fn account_command(
             if !rt.account(&id, |a| a.logged_in) {
                 return Err("Faça login antes de abrir a página".into());
             }
+            let ticket = rt.account(&id, |a| a.ticket());
+            let _ = verified_credentials(&app, &id, ticket)?;
             let kind = if command == "channel:show" {
                 "player"
             } else {
@@ -384,8 +453,11 @@ async fn account_command(
                 })
                 .ok_or("Canal inválido")?;
             let ticket = rt.account(&id, |a| a.ticket());
-            let c = credentials(&app, &id)?;
             let mut cancel = rt.cancel[id.index()].subscribe();
+            let c = verified_credentials(&app, &id, ticket)?;
+            if !rt.current(&id, ticket) {
+                return Err("Sessão alterada".into());
+            }
             let sent = tokio::select! {v=crate::chat::send(&app,&id,&room,content,&c)=>v,_=cancel.changed()=>Err("Sessão alterada".into())};
             if !rt.current(&id, ticket) {
                 return Err("Sessão alterada".into());
@@ -446,12 +518,65 @@ pub fn credentials(app: &AppHandle, id: &AccountId) -> Result<Credentials, Strin
         })?,
         device: read("unique_id")?,
         xsrf: read("XSRF-TOKEN")?,
+        agent: rt
+            .engine
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|v| v["userAgent"].as_str())
+            .unwrap_or("")
+            .to_string(),
         cookies: cookies
             .iter()
             .map(|c| format!("{}={}", c.name(), c.value()))
             .collect::<Vec<_>>()
             .join("; "),
     })
+}
+fn owned_popup(
+    app: &AppHandle,
+    id: &AccountId,
+    dir: &std::path::Path,
+    url: url::Url,
+    features: tauri::webview::NewWindowFeatures,
+) -> tauri::webview::NewWindowResponse<tauri::Wry> {
+    use tauri::webview::NewWindowResponse;
+    let rt = app.state::<Runtime>();
+    let ticket = rt.account(id, |a| a.ticket());
+    if url.scheme() != "https"
+        || !rt.current(id, ticket)
+        || !rt.account(id, |a| a.used && !a.logout_pending)
+    {
+        return NewWindowResponse::Deny;
+    }
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let name = format!("{}-popup-{}", id.0, SEQUENCE.fetch_add(1, Ordering::SeqCst));
+    let owner_app = app.clone();
+    let owner_id = id.clone();
+    let owner_dir = dir.to_path_buf();
+    let result = WebviewWindowBuilder::new(
+        app,
+        name,
+        WebviewUrl::External("about:blank".parse().unwrap()),
+    )
+    .title(format!("{} — {} — Login", rt.platform.name(), id.0))
+    .data_directory(dir.to_path_buf())
+    .window_features(features)
+    .on_navigation(|u| u.scheme() == "https" || u.as_str() == "about:blank")
+    .on_new_window(move |u, f| owned_popup(&owner_app, &owner_id, &owner_dir, u, f))
+    .build();
+    match result {
+        Ok(window) => {
+            if !rt.current(id, ticket) || !rt.account(id, |a| a.used && !a.logout_pending) {
+                let _ = window.destroy();
+                NewWindowResponse::Deny
+            } else {
+                webview::secure_remote(&window, app);
+                NewWindowResponse::Create { window }
+            }
+        }
+        Err(_) => NewWindowResponse::Deny,
+    }
 }
 pub fn open_remote(
     app: &AppHandle,
@@ -462,6 +587,9 @@ pub fn open_remote(
 ) -> Result<WebviewWindow, String> {
     let rt = app.state::<Runtime>();
     let owner_ticket = rt.account(id, |a| a.ticket());
+    if kind == "auth" && visible && rt.suspended[id.index()].load(Ordering::SeqCst) {
+        return Err("Saída da conta em andamento".into());
+    }
     if kind != "auth"
         && !rt.account(id, |a| {
             a.current(owner_ticket) && a.logged_in && a.used && !a.logout_pending
@@ -495,6 +623,12 @@ pub fn open_remote(
                         c.shown = true;
                     }
                 });
+                w.navigate(
+                    format!("{}/{}", rt.platform.origin(), slug.unwrap())
+                        .parse()
+                        .unwrap(),
+                )
+                .map_err(|_| "Falha ao mostrar player")?;
             }
         }
         return Ok(w);
@@ -533,19 +667,17 @@ pub fn open_remote(
     let popup_dir = dir.clone();
     let builder=WebviewWindowBuilder::new(app,&name,WebviewUrl::External("about:blank".parse().unwrap()))
         .title(format!("{} — {} — {}",rt.platform.name(),id.0,slug.unwrap_or("Login")))
-        .data_directory(dir).additional_browser_args("--autoplay-policy=no-user-gesture-required --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows")
+        .data_directory(dir).additional_browser_args("--autoplay-policy=no-user-gesture-required --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --disable-background-media-suspend --disable-features=CalculateNativeWinOcclusion,BackgroundVideoTrackOptimization,IntensiveWakeUpThrottling")
         .inner_size(if kind=="player"{480.}else{1000.},if kind=="player"{270.}else{800.}).visible(false)
         .on_navigation(|u|u.scheme()=="https"||u.as_str()=="about:blank")
-        .on_new_window(move|url,features|{
-            if url.scheme()!="https"{return tauri::webview::NewWindowResponse::Deny}
-            let n=format!("{}-popup-{}",id_popup.0,model::now());
-            match WebviewWindowBuilder::new(&app_popup,n,WebviewUrl::External("about:blank".parse().unwrap())).data_directory(popup_dir.clone()).window_features(features).on_navigation(|u|u.scheme()=="https"||u.as_str()=="about:blank").build(){Ok(window)=>tauri::webview::NewWindowResponse::Create{window},Err(_)=>tauri::webview::NewWindowResponse::Deny}
-        });
+        .on_new_window(move|url,features|owned_popup(&app_popup,&id_popup,&popup_dir,url,features));
     let w = builder
         .build()
         .map_err(|_| "Falha ao criar página oficial")?;
     let ticket = owner_ticket;
-    if kind != "auth" && !rt.current(id, ticket) {
+    if (kind != "auth" || visible)
+        && (!rt.current(id, ticket) || !rt.account(id, |a| a.used && !a.logout_pending))
+    {
         let _ = w.destroy();
         return Err("Sessão alterada".into());
     }
@@ -603,6 +735,9 @@ pub fn open_remote(
             if let Some(s) = s.as_ref() {
                 if k == "player" {
                     rt.account(&id_close, |a| {
+                        if !a.current(ticket) {
+                            return;
+                        }
                         if let Some(c) = a.status.get_mut(s).filter(|c| c.watching_since == started)
                         {
                             c.watched_ms += c
@@ -619,13 +754,39 @@ pub fn open_remote(
             emit_state(&app_close);
         }
     });
-    if kind == "player" {
+    if kind == "player" || kind == "chest" {
         webview::visibility(&w, visible);
     } else if visible {
         let _ = w.show();
         let _ = w.set_focus();
     }
     Ok(w)
+}
+pub fn close_for_ticket(app: &AppHandle, id: &AccountId, ticket: u64) {
+    let windows = app
+        .webview_windows()
+        .into_iter()
+        .filter(|(l, _)| l.starts_with(&format!("{}-", id.0)) && !l.ends_with("-auth"))
+        .map(|(_, w)| w)
+        .collect::<Vec<_>>();
+    let rt = app.state::<Runtime>();
+    if rt
+        .apply_current(id, ticket, |a| {
+            for c in a.status.values_mut() {
+                c.watched_ms += c
+                    .watching_since
+                    .take()
+                    .map(|t| model::now().saturating_sub(t))
+                    .unwrap_or(0);
+                c.shown = false;
+            }
+        })
+        .is_some()
+    {
+        for w in windows {
+            let _ = w.destroy();
+        }
+    }
 }
 pub fn close_players(app: &AppHandle, id: &AccountId) {
     let rt = app.state::<Runtime>();
@@ -652,7 +813,9 @@ pub fn close_players(app: &AppHandle, id: &AccountId) {
 }
 async fn logout(app: &AppHandle, id: &AccountId) -> Result<(), String> {
     let rt = app.state::<Runtime>();
-    rt.suspended[id.index()].store(true, Ordering::SeqCst);
+    if rt.suspended[id.index()].swap(true, Ordering::SeqCst) {
+        return Err("Saída da conta em andamento".into());
+    }
     rt.invalidate(id);
     rt.account(id, |a| {
         a.used = false;
@@ -789,8 +952,8 @@ async fn poll_account(app: AppHandle, id: AccountId, c: Credentials, ticket: u64
             Ok(i) => i,
             Err(e) => {
                 if rt.current(&id, ticket) {
-                    rt.account(&id, |a| a.logged_in = false);
-                    close_players(&app, &id);
+                    rt.apply_current(&id, ticket, |a| a.logged_in = false);
+                    close_for_ticket(&app, &id, ticket);
                 }
                 return Err(e);
             }
@@ -804,13 +967,23 @@ async fn poll_account(app: AppHandle, id: AccountId, c: Credentials, ticket: u64
         {
             return Err("Sessão alterada".into());
         }
-        if rt
-            .apply_current(&id, ticket, |a| a.adopt_identity(identity))
-            .is_none()
-        {
-            return Err("Sessão alterada".into());
+        let changed = rt
+            .apply_current(&id, ticket, |a| {
+                let changed = a.identity.as_ref().is_some_and(|old| old.id != identity.id);
+                a.adopt_identity(identity);
+                changed
+            })
+            .ok_or("Sessão alterada")?;
+        if changed {
+            rt.confirmed.lock().unwrap()[id.index()].clear();
+            rt.chest_retry
+                .lock()
+                .unwrap()
+                .retain(|k, _| !k.starts_with(&format!("{}:", id.0)));
+            close_for_ticket(&app, &id, ticket);
         }
         let slugs = rt.account(&id, |a| a.channels.clone());
+        let observation = rt.observation.fetch_add(1, Ordering::SeqCst);
         let rows = platform::channels(rt.platform, &c, &slugs).await?;
         if !rt.current(&id, ticket)
             || credentials(&app, &id)
@@ -836,10 +1009,12 @@ async fn poll_account(app: AppHandle, id: AccountId, c: Credentials, ticket: u64
                 ch.last_gain = old.last_gain;
                 ch.cooldown_until = old.cooldown_until;
                 ch.inspection_failures = old.inspection_failures;
+                ch.video = old.video.clone();
+                ch.balance_revision = old.balance_revision;
                 ch.chest_error = old.chest_error.clone();
                 a.status.insert(s.clone(), ch);
                 if let Some(p) = points {
-                    a.set_balance(&s, p, model::now());
+                    a.set_balance_observed(&s, p, model::now(), observation);
                 }
             }
             a.error = None;
@@ -847,6 +1022,12 @@ async fn poll_account(app: AppHandle, id: AccountId, c: Credentials, ticket: u64
         })
         .ok_or("Sessão alterada")?;
         reconcile(&app, &id)?;
+        webview::inspect_players(&app, &id, ticket).await;
+        rt.observe(
+            &id,
+            "poll",
+            rt.account(&id, |a| a.snapshot(rt.platform, model::now())),
+        );
         crate::chest::schedule(&app, &id);
         Ok::<(), String>(())
     };
@@ -900,7 +1081,7 @@ fn tick_account(app: &AppHandle, id: &AccountId) {
         });
         let Some(next) = next else { return };
         rt.cancel[id.index()].send_replace(next);
-        close_players(app, id);
+        close_for_ticket(app, id, next);
         rt.next_poll[id.index()].store(0, Ordering::SeqCst);
         next
     } else {
@@ -934,7 +1115,19 @@ fn start_tasks(app: &AppHandle) {
             tauri::async_runtime::spawn(async move {
                 crate::chat::receive(a, i).await;
             });
+            let mut last_tick = model::now();
             loop {
+                let current = model::now();
+                if current.saturating_sub(last_tick) > 60_000 || current < last_tick {
+                    let rt = app.state::<Runtime>();
+                    if rt.account(&id, |a| a.used) {
+                        rt.invalidate(&id);
+                        close_players(&app, &id);
+                        rt.digests.lock().unwrap()[id.index()] = None;
+                        rt.next_poll[id.index()].store(0, Ordering::SeqCst);
+                    }
+                }
+                last_tick = current;
                 if app.state::<Runtime>().stopping.load(Ordering::SeqCst) {
                     break;
                 }
@@ -983,7 +1176,18 @@ pub fn run() {
         })
         .setup(|app| {
             let root = if std::env::args().any(|a| a == "--smoke-test") {
-                std::env::temp_dir().join(format!("terino-prototype-smoke-{}", std::process::id()))
+                {
+                    let path = std::env::var_os("TERINO_SMOKE_PROFILE")
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| {
+                            std::env::temp_dir()
+                                .join(format!("terino-prototype-smoke-{}", std::process::id()))
+                        });
+                    if !path.starts_with(std::env::temp_dir()) {
+                        return Err("O perfil de smoke deve ficar no diretório temporário".into());
+                    }
+                    path
+                }
             } else {
                 app.path().app_data_dir()?
             };

@@ -12,6 +12,8 @@ Build experimental, separado dos aplicativos Electron. A interface mantém a dis
 
 Perfis próprios em `%APPDATA%/com.jggomes11.twitchterino.prototype` ou `%APPDATA%/com.jggomes11.kickterino.prototype` (a localização efetiva depende do Windows/Tauri). Encerrar e remover esses diretórios descarta apenas os dados de teste. A versão Electron e seus dados continuam nos diretórios originais.
 
+Os contadores de ganhos e baús deste protótipo são da execução atual; o histórico completo ainda não foi portado. Compare pelos saldos inicial/final de cada live.
+
 O protótipo permite até quatro contas; o ensaio principal usa uma conta e duas lives por aplicativo. Slots sem uso não criam janelas de login ou players. Ao selecionar outra conta, a coleta das contas conectadas continua. Renovações de token precisam manter a referência de saldo; outra identidade deve iniciar referência própria. Ao testar logout, confira que as outras contas continuam conectadas.
 
 ## Comparar com Electron
@@ -30,11 +32,13 @@ $testApp = Start-Process '.\Twitchterino-Tauri-Prototype.exe' -PassThru
 .\Measure-Prototype.ps1 -RootProcessId $testApp.Id -WarmupSeconds 600 -DurationSeconds 1800 -OutputDirectory '.\medicao-twitch-tauri-01'
 ```
 
-O coletor registra memória privada/working set por processo e CPU da árvore em intervalos de 5 s. O resumo agrega memória privada; working set permanece por processo para evitar tratar páginas compartilhadas somadas como memória única. GPU/decoder e rede ficam explicitamente sem medição pelo script; use ferramentas Windows apropriadas se disponíveis e registre o método. Não publicar perfis, cookies, tokens ou mensagens privadas.
+O coletor registra memória privada comprometida (`privateBytes`), RAM privada residente (`residentPrivateBytes`, quando o contador Windows está disponível), working set por processo e CPU da árvore em intervalos de 5 s. O resumo agrega memória privada; working set permanece por processo para evitar tratar páginas compartilhadas somadas como memória única. GPU/decoder e rede ficam explicitamente sem medição pelo script; use ferramentas Windows apropriadas se disponíveis e registre o método. Não publicar perfis, cookies, tokens ou mensagens privadas.
+
+O arquivo `observations.jsonl` de cada slot registra saldo, ganho observado, qualidade efetiva do vídeo e versão do WebView2, sem tokens ou chat. A observação de resgates manuais Twitch não implementa o histórico de bônus. Os arquivos giram ao ultrapassar 5 MiB; preserve uma cópia ao encerrar cada rodada prolongada.
 
 ## O que a validação automática comprova
 
-Testes Rust e da ponte: baseline, isolamento lógico, geração e seleção. Smoke Windows: quatro perfis com cookies fictícios separados, acesso nativo negado às páginas remotas e encerramento natural do executável. **Não comprova login real, pontos, baús reais ou economia de RAM.** O arquivo `native-smoke.json` identifica exatamente a evidência obtida.
+Testes Rust e da ponte: baseline, isolamento lógico, geração e seleção. Smoke Windows: quatro perfis com cookies fictícios separados, persistência desses cookies após reiniciar, acesso nativo negado às páginas remotas e encerramento natural do executável. **Não comprova login real, pontos, baús reais ou economia de RAM.** O arquivo `native-smoke.json` identifica exatamente a evidência obtida.
 
 ## Desenvolvimento
 

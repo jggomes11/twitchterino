@@ -52,44 +52,50 @@ pub async fn cdp(w: &WebviewWindow, method: &str, params: Value) -> Result<Value
         .map_err(|_| "Página encerrada")?
 }
 pub fn visibility(w: &WebviewWindow, visible: bool) {
-    let _ = w.eval(if visible {
-        "document.querySelectorAll('video,audio').forEach(v=>v.muted=false)"
-    } else {
-        "document.querySelectorAll('video,audio').forEach(v=>v.muted=true)"
-    });
-    let _ = w.set_skip_taskbar(!visible);
-    let _ = w.set_focusable(visible);
-    let _ = w.set_ignore_cursor_events(!visible);
-    if let Ok(hwnd) = w.hwnd() {
-        unsafe {
-            let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED.0 as isize);
-            let _ = SetLayeredWindowAttributes(
-                hwnd,
-                ::windows::Win32::Foundation::COLORREF(0),
-                if visible { 255 } else { 0 },
-                LWA_ALPHA,
-            );
-            let _ = ShowWindow(hwnd, if visible { SW_SHOW } else { SW_SHOWNOACTIVATE });
-        }
-    }
-    let _ = w.set_size(tauri::LogicalSize::new(
-        if visible { 1100. } else { 480. },
-        if visible { 800. } else { 270. },
-    ));
-    if visible {
-        let _ = w.set_focus();
-    } else {
-        let _ = w.set_position(tauri::LogicalPosition::new(0., 0.));
-    }
-    let _ = w.with_webview(move |view| unsafe {
-        if let Ok(core) = view.controller().CoreWebView2() {
-            if let Ok(v) = core.cast::<ICoreWebView2_8>() {
-                let _ = v.SetIsMuted(!visible);
+    let window = w.clone();
+    let app = w.app_handle().clone();
+    let _ = app.run_on_main_thread(move || {
+        let _ = window.eval(if visible {
+            "document.querySelectorAll('video,audio').forEach(v=>v.muted=false)"
+        } else {
+            "document.querySelectorAll('video,audio').forEach(v=>v.muted=true)"
+        });
+        let _ = window.set_skip_taskbar(!visible);
+        let _ = window.set_focusable(visible);
+        let _ = window.set_ignore_cursor_events(!visible);
+        if let Ok(hwnd) = window.hwnd() {
+            unsafe {
+                let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED.0 as isize);
+                let _ = SetLayeredWindowAttributes(
+                    hwnd,
+                    ::windows::Win32::Foundation::COLORREF(0),
+                    if visible { 255 } else { 0 },
+                    LWA_ALPHA,
+                );
+                let _ = ShowWindow(hwnd, if visible { SW_SHOW } else { SW_SHOWNOACTIVATE });
             }
         }
+        let _ = window.set_size(tauri::LogicalSize::new(
+            if visible { 1100. } else { 480. },
+            if visible { 800. } else { 270. },
+        ));
+        if visible {
+            let _ = window.set_focus();
+        } else {
+            let _ = window.set_position(tauri::LogicalPosition::new(0., 0.));
+        }
+        let _ = window.with_webview(move |view| unsafe {
+            let _ = view.controller().SetIsVisible(true);
+            if let Ok(core) = view.controller().CoreWebView2() {
+                if let Ok(v) = core.cast::<ICoreWebView2_8>() {
+                    let _ = v.SetIsMuted(!visible);
+                }
+            }
+        });
     });
 }
+
 pub fn keep_awake(app: &AppHandle, active: bool) {
     let _ = app.run_on_main_thread(move || unsafe {
         use ::windows::Win32::System::Power::*;
@@ -139,24 +145,42 @@ pub fn instrument(
     ticket: u64,
     target_url: String,
 ) -> Result<(), String> {
-    let _ = w.with_webview(|view| unsafe {
-        if let Ok(core) = view.controller().CoreWebView2() {
-            let deny = PermissionRequestedEventHandler::create(Box::new(|_, args| {
-                if let Some(args) = args {
-                    args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY)?;
-                }
-                Ok(())
-            }));
-            let mut token = Default::default();
-            let _ = core.add_PermissionRequested(&deny, &mut token);
-        }
-    });
+    secure_remote(w, app);
     if kind == "auth" {
         w.navigate(target_url.parse().unwrap())
             .map_err(|_| "Falha ao abrir login")?;
         return Ok(());
     }
     let slug = slug.unwrap().to_string();
+    if app.state::<Runtime>().platform == Platform::Twitch {
+        observe_redemptions(w, app, id, &slug, ticket)?;
+    }
+    let fail_app = app.clone();
+    let fail_id = id.clone();
+    let fail_slug = slug.clone();
+    let _ = w.with_webview(move |view| unsafe {
+        if let Ok(core) = view.controller().CoreWebView2() {
+            let handler =
+                webview2_com::NavigationCompletedEventHandler::create(Box::new(move |_, args| {
+                    if let Some(args) = args {
+                        let mut success = ::windows::Win32::Foundation::BOOL::default();
+                        args.IsSuccess(&mut success)?;
+                        if !success.as_bool() {
+                            let rt = fail_app.state::<Runtime>();
+                            rt.apply_current(&fail_id, ticket, |a| {
+                                if let Some(c) = a.status.get_mut(&fail_slug) {
+                                    c.error = Some("Falha ao carregar a página oficial".into());
+                                }
+                            });
+                            windows::emit_state(&fail_app);
+                        }
+                    }
+                    Ok(())
+                }));
+            let mut token = Default::default();
+            let _ = core.add_NavigationCompleted(&handler, &mut token);
+        }
+    });
     let app_event = app.clone();
     let id_event = id.clone();
     let window = w.clone();
@@ -251,7 +275,9 @@ pub fn instrument(
                         } else {
                             Some(raw.into())
                         };
-                        if let Some(low) = text.and_then(|s| crate::platform::lowest_playlist(&s)) {
+                        if let Some(low) =
+                            text.and_then(|s| crate::platform::lowest_playlist_for(rt.platform, &s))
+                        {
                             let headers = p["responseHeaders"]
                                 .as_array()
                                 .map(|h| {
@@ -327,14 +353,20 @@ pub fn smoke(app: AppHandle) {
         let outcome=async{
         let main=app.get_webview_window("main").ok_or("UI ausente")?;
         let mut ready=false;for _ in 0..40{if let Ok(v)=cdp(&main,"Runtime.evaluate",json!({"expression":"document.querySelectorAll('#accounts button').length === 4","returnByValue":true})).await{if v.pointer("/result/value")==Some(&json!(true)){ready=true;break}}tokio::time::sleep(Duration::from_millis(500)).await;}if !ready{return Err("UI não criou as quatro contas".into())}
+        if let Ok(v)=cdp(&main,"Page.captureScreenshot",json!({"format":"png","captureBeyondViewport":false})).await{if let Some(data)=v["data"].as_str(){if let Ok(bytes)=STANDARD.decode(data){if let Some(out)=std::env::var_os("TERINO_SMOKE_OUTPUT"){let _=std::fs::write(PathBuf::from(out).with_extension("png"),bytes);}}}}
         let mut windows=vec![];
-        for n in 1..=4{let id=AccountId::parse(&format!("account-{n}"))?;let w=windows::open_remote(&app,&id,"auth",None,false)?;let cookie=tauri::webview::Cookie::build(("terino-prototype-fixture",format!("slot-{n}"))).domain(app.state::<Runtime>().platform.origin().parse::<url::Url>().unwrap().host_str().unwrap().to_string()).path("/").secure(true).build();w.set_cookie(cookie).map_err(|_|"Falha ao definir cookie fictício")?;windows.push(w);}
+        for n in 1..=4{let id=AccountId::parse(&format!("account-{n}"))?;let w=windows::open_remote(&app,&id,"auth",None,false)?;let cookie=tauri::webview::Cookie::build(("terino-prototype-fixture",format!("slot-{n}"))).domain(app.state::<Runtime>().platform.origin().parse::<url::Url>().unwrap().host_str().unwrap().to_string()).path("/").secure(true).expires(tauri::webview::cookie::time::OffsetDateTime::now_utc()+tauri::webview::cookie::time::Duration::days(1)).build();if std::env::var("TERINO_SMOKE_PHASE").unwrap_or_default()!="read"{w.set_cookie(cookie).map_err(|_|"Falha ao definir cookie fictício")?;}windows.push(w);}
+        visibility(&windows[0],false);
+        let background=cdp(&windows[0],"Runtime.evaluate",json!({"expression":"document.visibilityState","returnByValue":true})).await?;
+        if background.pointer("/result/value")!=Some(&json!("visible")){return Err("WebView de coleta permaneceu oculto para a página".into())}
+        cdp(&windows[0],"Fetch.enable",json!({"patterns":[{"urlPattern":"*.m3u8*","requestStage":"Response"}]})).await?;
+        cdp(&windows[0],"Fetch.disable",json!({})).await?;
         for (i,w) in windows.iter().enumerate(){let cookies=w.cookies().map_err(|_|"Falha ao ler cookies")?;let values:Vec<_>=cookies.iter().filter(|c|c.name()=="terino-prototype-fixture").map(|c|c.value().to_string()).collect();if values!=vec![format!("slot-{}",i+1)]{return Err("Cookies misturados entre contas".into())}
             let denied=cdp(w,"Runtime.evaluate",json!({"expression":"globalThis.__TAURI_INTERNALS__ ? globalThis.__TAURI_INTERNALS__.invoke('snapshot').then(()=>false,()=>true) : true","awaitPromise":true,"returnByValue":true})).await?;
             if denied.pointer("/result/value")!=Some(&json!(true)){return Err("Página remota acessou comando nativo".into())}
         }
         for w in windows{w.destroy().map_err(|_|"Falha ao encerrar perfil")?;}
-        Ok::<_,String>(json!({"passed":true,"accounts":4,"cookieIsolation":true,"remoteIpcDenied":true,"realLogin":false,"realPointsMeasured":false}))
+        Ok::<_,String>(json!({"passed":true,"accounts":4,"cookieIsolation":true,"remoteIpcDenied":true,"backgroundVisible":true,"fetchAvailable":true,"realMediaValidated":false,"persistenceRead":std::env::var("TERINO_SMOKE_PHASE").unwrap_or_default()=="read","realLogin":false,"realPointsMeasured":false}))
     }.await;
         let output = std::env::var_os("TERINO_SMOKE_OUTPUT")
             .map(PathBuf::from)
@@ -346,3 +378,211 @@ pub fn smoke(app: AppHandle) {
     });
 }
 use std::path::PathBuf;
+
+pub async fn inspect_players(app: &AppHandle, id: &AccountId, ticket: u64) {
+    let rt = app.state::<Runtime>();
+    let items = rt.account(id, |a| {
+        a.status
+            .iter()
+            .filter_map(|(s, c)| Some((s.clone(), c.watching_since?, c.shown)))
+            .collect::<Vec<_>>()
+    });
+    for (slug, started, shown) in items {
+        if !rt.current(id, ticket) {
+            return;
+        }
+        if model::now().saturating_sub(started) < 15_000 {
+            continue;
+        }
+        let Some(w) = app.get_webview_window(&windows::label(id, "player", Some(&slug))) else {
+            continue;
+        };
+        let script = r#"(()=>{const v=document.querySelector('video');return {gate:!!document.querySelector('[data-testid="mature"],[data-a-target="content-classification-gate-overlay-start-watching-button"],[data-a-target="player-overlay-mature-accept"]'),visibility:document.visibilityState,video:v?{paused:v.paused,time:Math.round(v.currentTime),width:v.videoWidth,height:v.videoHeight,ready:v.readyState}:null};})()"#;
+        let result = cdp(
+            &w,
+            "Runtime.evaluate",
+            json!({"expression":script,"returnByValue":true}),
+        )
+        .await
+        .and_then(|v| {
+            v.pointer("/result/value")
+                .cloned()
+                .filter(Value::is_object)
+                .ok_or("Inspeção de mídia indisponível".into())
+        });
+        let mut restart = false;
+        rt.apply_current(id, ticket, |a| {
+            if let Some(c) = a
+                .status
+                .get_mut(&slug)
+                .filter(|c| c.watching_since == Some(started))
+            {
+                match result {
+                    Ok(info) => {
+                        c.inspection_failures = 0;
+                        c.age_gate = info["gate"] == true;
+                        c.video = info;
+                    }
+                    Err(_) => {
+                        c.inspection_failures = c.inspection_failures.saturating_add(1);
+                        restart = !shown
+                            && (rt.platform == Platform::Kick
+                                || (c.inspection_failures >= 3
+                                    && model::now().saturating_sub(started) > 180_000));
+                        if restart {
+                            c.error = Some("Player sem resposta; será reaberto".into());
+                            c.watching_since = None;
+                        }
+                    }
+                }
+            }
+        });
+        if restart {
+            let _ = w.destroy();
+            rt.next_poll[id.index()].store(0, Ordering::SeqCst);
+        }
+    }
+    windows::emit_state(app);
+}
+
+pub fn secure_remote(w: &WebviewWindow, app: &AppHandle) {
+    let app = app.clone();
+    let _ = w.with_webview(move |view| unsafe {
+        if let Ok(core) = view.controller().CoreWebView2() {
+            let handler = PermissionRequestedEventHandler::create(Box::new(|_, args| {
+                if let Some(args) = args {
+                    args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY)?;
+                }
+                Ok(())
+            }));
+            let mut token = Default::default();
+            let _ = core.add_PermissionRequested(&handler, &mut token);
+            let mut version = PWSTR::null();
+            let mut agent = PWSTR::null();
+            let version = if view
+                .environment()
+                .BrowserVersionString(&mut version)
+                .is_ok()
+            {
+                CoTaskMemPWSTR::from(version).to_string()
+            } else {
+                String::new()
+            };
+            let agent = if let Ok(settings) = core
+                .Settings()
+                .and_then(|s| s.cast::<ICoreWebView2Settings2>())
+            {
+                if settings.UserAgent(&mut agent).is_ok() {
+                    CoTaskMemPWSTR::from(agent).to_string()
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+            *app.state::<Runtime>().engine.lock().unwrap() =
+                Some(json!({"browserVersion":version,"userAgent":agent}));
+        }
+    });
+}
+fn observe_redemptions(
+    w: &WebviewWindow,
+    app: &AppHandle,
+    id: &AccountId,
+    slug: &str,
+    ticket: u64,
+) -> Result<(), String> {
+    let pending = Arc::new(Mutex::new(
+        std::collections::BTreeMap::<String, String>::new(),
+    ));
+    let requests = pending.clone();
+    let request_app = app.clone();
+    let request_id = id.clone();
+    receiver(w, "Network.requestWillBeSent", move |p| {
+        if !request_app.state::<Runtime>().current(&request_id, ticket)
+            || p.pointer("/request/url").and_then(Value::as_str)
+                != Some("https://gql.twitch.tv/gql")
+        {
+            return;
+        }
+        let Some(body) = p.pointer("/request/postData").and_then(Value::as_str) else {
+            return;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(body) else {
+            return;
+        };
+        let ops = match v {
+            Value::Array(a) => a,
+            v => vec![v],
+        };
+        for op in ops {
+            if op["operationName"] == "RedeemCustomReward" {
+                if let (Some(request), Some(reward)) = (
+                    p["requestId"].as_str(),
+                    op.pointer("/variables/input/rewardID")
+                        .and_then(Value::as_str),
+                ) {
+                    let mut map = requests.lock().unwrap();
+                    if map.len() >= 100 {
+                        map.clear();
+                    }
+                    map.insert(request.into(), reward.into());
+                }
+            }
+        }
+    })?;
+    let app = app.clone();
+    let id = id.clone();
+    let slug = slug.to_string();
+    let w = w.clone();
+    let listener = w.clone();
+    receiver(&listener, "Network.loadingFinished", move |p| {
+        let Some(request) = p["requestId"].as_str() else {
+            return;
+        };
+        let Some(reward) = pending.lock().unwrap().remove(request) else {
+            return;
+        };
+        let request = request.to_string();
+        let app = app.clone();
+        let id = id.clone();
+        let slug = slug.clone();
+        let w = w.clone();
+        tauri::async_runtime::spawn(async move {
+            let rt = app.state::<Runtime>();
+            if !rt.current(&id, ticket) {
+                return;
+            }
+            if let Ok(v) = cdp(&w, "Network.getResponseBody", json!({"requestId":request})).await {
+                let raw = v["body"].as_str().unwrap_or("");
+                let bytes = if v["base64Encoded"] == true {
+                    STANDARD.decode(raw).ok()
+                } else {
+                    Some(raw.as_bytes().to_vec())
+                };
+                let Some(bytes) = bytes else { return };
+                let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
+                    return;
+                };
+                let ops = match v {
+                    Value::Array(a) => a,
+                    v => vec![v],
+                };
+                let confirmed = ops.iter().any(|v| {
+                    v.get("errors")
+                        .is_none_or(|e| e.as_array().is_some_and(|a| a.is_empty()))
+                        && v.pointer("/data/redeemCustomReward").is_some_and(|r| {
+                            !r.is_null() && r.get("error").is_none_or(|e| e.is_null())
+                        })
+                });
+                if confirmed && rt.current(&id, ticket) {
+                    rt.observe(
+                        &id,
+                        "reward-confirmed",
+                        json!({"slug":slug,"rewardId":reward,"bonusHistoryImplemented":false}),
+                    );
+                }
+            }
+        });
+    })
+}

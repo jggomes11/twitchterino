@@ -10,6 +10,7 @@ pub struct Credentials {
     pub device: String,
     pub xsrf: String,
     pub cookies: String,
+    pub agent: String,
 }
 impl Credentials {
     pub fn fingerprint(&self) -> String {
@@ -80,6 +81,9 @@ pub async fn request(
             url,
         )
         .header("Referer", format!("{}/", p.origin()));
+    if !c.agent.is_empty() {
+        r = r.header("User-Agent", &c.agent);
+    }
     if p == Platform::Twitch {
         r = r
             .header("Client-Id", "kimne78kx3ncx6brgo4mv6wki5h1ko")
@@ -345,6 +349,9 @@ pub async fn channels(
     Ok(result)
 }
 pub fn lowest_playlist(text: &str) -> Option<String> {
+    lowest_playlist_for(Platform::Kick, text)
+}
+pub fn lowest_playlist_for(p: Platform, text: &str) -> Option<String> {
     let lines: Vec<_> = text.lines().collect();
     let mut head = vec![];
     let mut variants = vec![];
@@ -361,13 +368,11 @@ pub fn lowest_playlist(text: &str) -> Option<String> {
             }
             i += 2;
         } else {
-            if variants.is_empty() {
-                head.push(lines[i]);
-            }
+            head.push(lines[i]);
             i += 1;
         }
     }
-    if variants.iter().any(|v| v.1.contains("RESOLUTION=")) {
+    if p == Platform::Twitch || variants.iter().any(|v| v.1.contains("RESOLUTION=")) {
         variants
             .retain(|v| v.1.contains("RESOLUTION=") && !v.1.to_lowercase().contains("audio_only"));
     }

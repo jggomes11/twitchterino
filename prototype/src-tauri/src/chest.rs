@@ -1,10 +1,10 @@
 use crate::{
     model::{self, AccountId, Platform},
-    platform::{self, Credentials},
+    platform::{self},
     webview,
     windows::{self, Runtime},
 };
-use serde_json::{json, Value};
+use serde_json::json;
 use std::{sync::atomic::Ordering, time::Duration};
 use tauri::{AppHandle, Manager};
 struct Busy<'a>(&'a std::sync::atomic::AtomicBool);
@@ -124,6 +124,7 @@ async fn claim_one(
             return Err("Sessão alterada".into());
         }
         let query=format!("query{{currentUser{{id login}} channel:user(login:{}){{channel{{self{{communityPoints{{balance availableClaim{{id}}}}}}}}}}}}",json!(slug));
+        let observation = rt.observation.fetch_add(1, Ordering::SeqCst);
         let v = platform::request(
             Platform::Twitch,
             "/gql",
@@ -137,7 +138,7 @@ async fn claim_one(
         {
             if rt
                 .apply_current(id, ticket, |a| {
-                    a.set_balance(slug, balance, model::now());
+                    a.set_balance_observed(slug, balance, model::now(), observation);
                     a.chests += 1;
                     if let Some(s) = a.status.get_mut(slug) {
                         s.claim = new_claim;

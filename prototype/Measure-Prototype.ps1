@@ -12,7 +12,9 @@ $summaryPath=Join-Path $OutputDirectory 'summary.json'
 if (Test-Path $csvPath) { throw 'Use uma pasta nova para não misturar rodadas.' }
 $logicalProcessors=[Environment]::ProcessorCount
 $os=Get-CimInstance Win32_OperatingSystem
-@{ startedUtc=[DateTime]::UtcNow.ToString('o'); rootProcessId=$RootProcessId; sampleSeconds=5; warmupSeconds=$WarmupSeconds; durationSeconds=$DurationSeconds; logicalProcessors=$logicalProcessors; windows=$os.Caption; windowsVersion=$os.Version; physicalMemoryBytes=[long]$os.TotalVisibleMemorySize*1024; gpuMeasured=$false; networkMeasured=$false; credentialsRead=$false } | ConvertTo-Json | Set-Content (Join-Path $OutputDirectory 'environment.json')
+$graphics=@(Get-CimInstance Win32_VideoController | Select-Object Name,DriverVersion)
+$rootStarted=(Get-Process -Id $RootProcessId).StartTime.ToUniversalTime().Ticks
+@{ startedUtc=[DateTime]::UtcNow.ToString('o'); rootProcessId=$RootProcessId; sampleSeconds=5; warmupSeconds=$WarmupSeconds; durationSeconds=$DurationSeconds; logicalProcessors=$logicalProcessors; windows=$os.Caption; windowsVersion=$os.Version; physicalMemoryBytes=[long]$os.TotalVisibleMemorySize*1024; graphics=$graphics; gpuMeasured=$false; networkMeasured=$false; credentialsRead=$false } | ConvertTo-Json | Set-Content (Join-Path $OutputDirectory 'environment.json')
 $warmupEnd=[DateTime]::UtcNow.AddSeconds($WarmupSeconds)
 while ([DateTime]::UtcNow -lt $warmupEnd) {
   if (-not (Get-Process -Id $RootProcessId -ErrorAction SilentlyContinue)) { throw 'O aplicativo encerrou durante a estabilização.' }
@@ -32,7 +34,11 @@ while ([DateTime]::UtcNow -lt $end) {
     $added=$false
     foreach ($entry in $inventory) { if ($ids.Contains([int]$entry.ParentProcessId) -and $ids.Add([int]$entry.ProcessId)) { $added=$true } }
   } while ($added)
+  $resident=@{}
+  try { Get-CimInstance Win32_PerfRawData_PerfProc_Process -OperationTimeoutSec 3 | ForEach-Object { $resident[[int]$_.IDProcess]=[long]$_.WorkingSetPrivate } } catch {}
   $rows=[Collections.Generic.List[object]]::new()
+  [long]$residentBytes=0
+  $residentComplete=$true
   [long]$privateBytes=0
   [double]$cpuDelta=0
   foreach ($processId in $ids) {
@@ -45,14 +51,16 @@ while ([DateTime]::UtcNow -lt $end) {
       if ($null -ne $lastTime) { $cpuDelta += if ($previous.ContainsKey($key)) { [Math]::Max(0,$cpu-$previous[$key]) } else { $cpu } }
       $previous[$key]=$cpu
       $privateBytes+=$process.PrivateMemorySize64
+      $privateResident=if ($resident.ContainsKey($processId)) { $resident[$processId] } else { $residentComplete=$false; $null }
+      if ($null -ne $privateResident) { $residentBytes+=$privateResident }
       $parent=($inventory | Where-Object ProcessId -eq $processId | Select-Object -First 1).ParentProcessId
-      $rows.Add([pscustomobject]@{ utc=$sampleTime.ToString('o'); processId=$processId; parentProcessId=$parent; name=$process.ProcessName; privateBytes=$process.PrivateMemorySize64; workingSetBytes=$process.WorkingSet64; cpuSeconds=$cpu })
+      $rows.Add([pscustomobject]@{ utc=$sampleTime.ToString('o'); processId=$processId; parentProcessId=$parent; name=$process.ProcessName; privateBytes=$process.PrivateMemorySize64; residentPrivateBytes=$privateResident; workingSetBytes=$process.WorkingSet64; cpuSeconds=$cpu })
     } catch { continue }
   }
-  if ($rows.Count -eq 0 -or -not (Get-Process -Id $RootProcessId -ErrorAction SilentlyContinue)) { $endedEarly=$true; break }
+  if ($rows.Count -eq 0 -or -not (Get-Process -Id $RootProcessId -ErrorAction SilentlyContinue) -or (Get-Process -Id $RootProcessId).StartTime.ToUniversalTime().Ticks -ne $rootStarted) { $endedEarly=$true; break }
   $rows | Export-Csv -Path $csvPath -Append -NoTypeInformation -Encoding utf8
   $cpuPercent=if ($null -eq $lastTime) { $null } else { 100*$cpuDelta/($sampleTime-$lastTime).TotalSeconds/$logicalProcessors }
-  $totals.Add([pscustomobject]@{ utc=$sampleTime.ToString('o'); privateBytes=$privateBytes; cpuPercent=$cpuPercent; processes=$rows.Count })
+  $totals.Add([pscustomobject]@{ utc=$sampleTime.ToString('o'); privateBytes=$privateBytes; residentPrivateBytes=$(if ($residentComplete) { $residentBytes } else { $null }); cpuPercent=$cpuPercent; processes=$rows.Count })
   $lastTime=$sampleTime
   Start-Sleep -Seconds 5
 }
@@ -61,6 +69,6 @@ function Statistics($Values) {
   if ($ordered.Count -eq 0) { return $null }
   @{ median=$ordered[[Math]::Floor(($ordered.Count-1)*0.5)]; p95=$ordered[[Math]::Ceiling(($ordered.Count-1)*0.95)]; peak=$ordered[-1] }
 }
-@{ samples=$totals.Count; endedEarly=$endedEarly; sampleSeconds=5; privateBytes=(Statistics @($totals | ForEach-Object privateBytes)); cpuPercentOfMachine=(Statistics @($totals | ForEach-Object cpuPercent)); workingSet='per-process only, shared pages may overlap'; gpu=$null; network=$null; realPoints='record per channel manually'; statistics='nearest-rank approximation, median lower central observation' } | ConvertTo-Json -Depth 5 | Set-Content $summaryPath
+@{ samples=$totals.Count; endedEarly=$endedEarly; sampleSeconds=5; privateBytes=(Statistics @($totals | ForEach-Object privateBytes)); residentPrivateBytes=(Statistics @($totals | ForEach-Object residentPrivateBytes)); residentCompleteSamples=@($totals | Where-Object { $null -ne $_.residentPrivateBytes }).Count; cpuPercentOfMachine=(Statistics @($totals | ForEach-Object cpuPercent)); workingSet='per-process only, shared pages may overlap'; gpu=$null; network=$null; realPoints='record per channel manually'; statistics='nearest-rank approximation, median lower central observation' } | ConvertTo-Json -Depth 5 | Set-Content $summaryPath
 $totals | Export-Csv (Join-Path $OutputDirectory 'totals.csv') -NoTypeInformation -Encoding utf8
 Write-Host "Medição salva em $OutputDirectory. Confirme os pontos por live separadamente."

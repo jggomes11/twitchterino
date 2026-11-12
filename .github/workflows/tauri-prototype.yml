@@ -39,18 +39,55 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force prototype/output | Out-Null
-          $env:TERINO_SMOKE_OUTPUT = Join-Path $PWD 'prototype/output/native-smoke.json'
-          $testProcess = Start-Process prototype/src-tauri/target/release/terino-prototype.exe -ArgumentList '--smoke-test' -PassThru
-          if (-not $testProcess.WaitForExit(120000)) {
-            Stop-Process -Id $testProcess.Id -Force -ErrorAction SilentlyContinue
-            throw 'Native smoke timed out; cleanup is not a passing test.'
+          $parseErrors = $null
+          $parseTokens = $null
+          [void][Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'prototype/Measure-Prototype.ps1'),[ref]$parseTokens,[ref]$parseErrors)
+          if ($parseErrors.Count -gt 0) { throw ($parseErrors | Out-String) }
+          $env:TERINO_SMOKE_PROFILE = Join-Path ([IO.Path]::GetTempPath()) "terino-smoke-$env:GITHUB_RUN_ID"
+          foreach ($phase in @('write','read')) {
+            $env:TERINO_SMOKE_PHASE = $phase
+            $env:TERINO_SMOKE_OUTPUT = Join-Path $PWD "prototype/output/native-smoke-$phase.json"
+            $testProcess = Start-Process prototype/src-tauri/target/release/terino-prototype.exe -ArgumentList '--smoke-test' -PassThru
+            $cohort=@{}
+            $deadline=[DateTime]::UtcNow.AddSeconds(120)
+            do {
+              $inventory=@(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId)
+              $ids=[Collections.Generic.HashSet[int]]::new()
+              [void]$ids.Add($testProcess.Id)
+              do { $added=$false; foreach ($entry in $inventory) { if ($ids.Contains([int]$entry.ParentProcessId) -and $ids.Add([int]$entry.ProcessId)) { $added=$true } } } while ($added)
+              foreach ($processId in $ids) { $p=Get-Process -Id $processId -ErrorAction SilentlyContinue; if ($p) { try { $cohort[$processId]=$p.StartTime.ToUniversalTime().Ticks } catch {} } }
+              $exited=$testProcess.WaitForExit(500)
+            } while (-not $exited -and [DateTime]::UtcNow -lt $deadline)
+            if (-not $exited) {
+              Stop-Process -Id $testProcess.Id -Force -ErrorAction SilentlyContinue
+              throw 'Native smoke timed out; cleanup is not a passing test.'
+            }
+            $childrenDeadline=[DateTime]::UtcNow.AddSeconds(15)
+            do {
+              $remaining=@(foreach ($processId in $cohort.Keys) { $p=Get-Process -Id $processId -ErrorAction SilentlyContinue; if ($p) { try { if ($p.StartTime.ToUniversalTime().Ticks -eq $cohort[$processId]) { $processId } } catch {} } })
+              if ($remaining.Count -gt 0) { Start-Sleep -Milliseconds 500 }
+            } while ($remaining.Count -gt 0 -and [DateTime]::UtcNow -lt $childrenDeadline)
+            if ($remaining.Count -gt 0) { throw "Prototype left live processes: $remaining" }
+            @{naturalExit=$true; descendantsExited=$true; processesObserved=$cohort.Count} | ConvertTo-Json | Set-Content "prototype/output/native-process-$phase.json"
+            if ($testProcess.ExitCode -ne 0) {
+              if (Test-Path $env:TERINO_SMOKE_OUTPUT) { Get-Content $env:TERINO_SMOKE_OUTPUT }
+              throw "Native smoke failed: $($testProcess.ExitCode)"
+            }
+            $proof = Get-Content $env:TERINO_SMOKE_OUTPUT -Raw | ConvertFrom-Json
+            if (-not $proof.passed -or $proof.accounts -ne 4 -or -not $proof.cookieIsolation -or -not $proof.remoteIpcDenied) { throw 'Incomplete native proof' }
+            if ($phase -eq 'read' -and -not $proof.persistenceRead) { throw 'Persistence not proven' }
           }
-          if ($testProcess.ExitCode -ne 0) {
-            if (Test-Path $env:TERINO_SMOKE_OUTPUT) { Get-Content $env:TERINO_SMOKE_OUTPUT }
-            throw "Native smoke failed: $($testProcess.ExitCode)"
-          }
-          $proof = Get-Content $env:TERINO_SMOKE_OUTPUT -Raw | ConvertFrom-Json
-          if (-not $proof.passed -or $proof.accounts -ne 4 -or -not $proof.cookieIsolation -or -not $proof.remoteIpcDenied) { throw 'Incomplete native proof' }
+          Copy-Item prototype/output/native-smoke-read.json prototype/output/native-smoke.json
+      - name: Validate metrics collector on disposable helper
+        shell: pwsh
+        run: |
+          $helper = Start-Process pwsh -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 25' -PassThru
+          $sampleDirectory = Join-Path $env:RUNNER_TEMP "collector-smoke-$env:GITHUB_RUN_ID"
+          & ./prototype/Measure-Prototype.ps1 -RootProcessId $helper.Id -WarmupSeconds 0 -DurationSeconds 5 -OutputDirectory $sampleDirectory
+          $metrics = Get-Content (Join-Path $sampleDirectory 'summary.json') -Raw | ConvertFrom-Json
+          if ($metrics.samples -lt 1 -or $metrics.endedEarly -or $null -eq $metrics.privateBytes) { throw 'Collector did not produce valid helper samples' }
+          if (-not $helper.WaitForExit(30000)) { Stop-Process -Id $helper.Id -Force; throw 'Disposable helper did not exit' }
+          @{passed=$true; samples=$metrics.samples; residentCompleteSamples=$metrics.residentCompleteSamples; measuredApplication=$false; purpose='collector functionality only'} | ConvertTo-Json | Set-Content prototype/output/collector-smoke.json
       - name: Package prototype evidence
         shell: pwsh
         run: |

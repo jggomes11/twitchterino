@@ -211,3 +211,52 @@ fn private_relationships_and_watch_time_do_not_survive_another_identity() {
     assert!(s["channels"][0]["following"].is_null());
     assert_eq!(s["channels"][0]["watchedMin"], 0);
 }
+#[test]
+fn stale_balance_cannot_double_count_a_confirmed_chest() {
+    let mut a = account();
+    a.adopt_identity(identity("1"));
+    a.set_balance_observed("alpha", 100, 1, 1);
+    a.set_balance_observed("alpha", 150, 2, 3);
+    assert!(!a.set_balance_observed("alpha", 100, 3, 2));
+    a.set_balance_observed("alpha", 150, 4, 4);
+    assert_eq!(a.status["alpha"].gained, 50);
+}
+#[test]
+fn twitch_playlist_retains_interleaved_media_group_metadata() {
+    let text="#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=1280x720\nhigh.m3u8\n#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID=\"low\"\n#EXT-X-STREAM-INF:BANDWIDTH=123000,RESOLUTION=284x160,VIDEO=\"low\"\nlow.m3u8\n";
+    assert!(lowest_playlist(text)
+        .unwrap()
+        .contains("#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID=\"low\""));
+}
+#[test]
+fn twitch_does_not_rewrite_a_playlist_without_video_variants() {
+    use terino_prototype::platform::lowest_playlist_for;
+    let text="#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=50000,VIDEO=\"audio_only\"\naudio.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=100000\nunknown.m3u8\n";
+    assert!(lowest_playlist_for(Platform::Twitch, text).is_none());
+}
+#[test]
+fn selected_reward_price_is_not_the_next_balance_goal() {
+    use terino_prototype::model::Reward;
+    let mut a = account();
+    a.channels = vec!["alpha".into()];
+    a.adopt_identity(identity("1"));
+    a.bonus_target = json!("xp:3");
+    a.status.insert(
+        "alpha".into(),
+        Channel {
+            points: Some(900),
+            rewards: vec![Reward {
+                id: "r".into(),
+                kind: "xp".into(),
+                hours: 3,
+                cost: 800,
+                available: true,
+            }],
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        a.snapshot(Platform::Twitch, 1)["channels"][0]["targetCost"],
+        800
+    );
+}

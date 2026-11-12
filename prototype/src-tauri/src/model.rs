@@ -83,6 +83,8 @@ pub struct Channel {
     pub age_gate: bool,
     pub chest_error: Option<String>,
     pub inspection_failures: u8,
+    pub video: Value,
+    pub balance_revision: u64,
 }
 impl Channel {
     pub fn costs(&self) -> [u64; 3] {
@@ -99,8 +101,7 @@ impl Channel {
         }
         c
     }
-    pub fn rank(&self, target: &Value) -> (usize, u64, u64) {
-        let p = self.points.unwrap_or(0);
+    pub fn target_cost(&self, target: &Value) -> Option<u64> {
         let c = self.costs();
         let selected = if let Some(t) = target.as_str().filter(|s| !s.is_empty()) {
             let mut parts = t.split(':');
@@ -122,6 +123,12 @@ impl Channel {
         } else {
             target.as_u64().filter(|v| [300, 500, 1000].contains(v))
         };
+        selected.filter(|v| *v > 0)
+    }
+    pub fn rank(&self, target: &Value) -> (usize, u64, u64) {
+        let p = self.points.unwrap_or(0);
+        let c = self.costs();
+        let selected = self.target_cost(target);
         if let Some(cost) = selected.filter(|v| *v > 0) {
             let tier = p / cost;
             let goal = (tier + 1) * cost;
@@ -245,6 +252,8 @@ impl Account {
                 c.shown = false;
                 c.cooldown_until = 0;
                 c.chest_error = None;
+                c.balance_revision = 0;
+                c.video = Value::Null;
             }
             self.today = 0;
             self.chests = 0;
@@ -254,6 +263,24 @@ impl Account {
         self.session_checking = false;
         self.error = None;
         self.used = true;
+    }
+    pub fn set_balance_observed(
+        &mut self,
+        slug: &str,
+        points: u64,
+        now: u64,
+        revision: u64,
+    ) -> bool {
+        if self
+            .status
+            .get(slug)
+            .is_some_and(|c| revision < c.balance_revision)
+        {
+            return false;
+        }
+        self.set_balance(slug, points, now);
+        self.status.get_mut(slug).unwrap().balance_revision = revision;
+        true
     }
     pub fn set_balance(&mut self, slug: &str, points: u64, now: u64) {
         let c = self.status.entry(slug.into()).or_default();
@@ -348,12 +375,36 @@ impl Account {
         chosen.extend(current);
         chosen
     }
+    pub fn bonus_options(&self) -> Vec<Value> {
+        let mut out = vec![];
+        for (kind, default) in [("xp", 300u64), ("capture", 500), ("lure", 1000)] {
+            for hours in [1u64, 3, 5, 10] {
+                let mut prices = BTreeMap::<u64, usize>::new();
+                for ch in self.status.values() {
+                    if let Some(r) = ch
+                        .rewards
+                        .iter()
+                        .find(|r| r.available && r.kind == kind && r.hours == hours)
+                    {
+                        *prices.entry(r.cost).or_default() += 1;
+                    }
+                }
+                let cost = prices
+                    .iter()
+                    .min_by_key(|(cost, count)| (std::cmp::Reverse(**count), **cost))
+                    .map(|(cost, _)| *cost)
+                    .unwrap_or(default * hours);
+                out.push(json!({"value":format!("{kind}:{hours}"),"kind":kind,"hours":hours,"cost":cost,"channels":prices.values().sum::<usize>(),"varies":prices.len()>1}));
+            }
+        }
+        out
+    }
     pub fn snapshot(&self, p: Platform, now: u64) -> Value {
         let channels:Vec<_>=self.channels.iter().map(|s|{
-            let c=self.status.get(s).cloned().unwrap_or_default();let known=self.logged_in && c.points.is_some();let(_,goal,left)=c.rank(&self.bonus_target);let costs=c.costs();let earning=c.earning(now);
-            json!({"slug":s,"displayName":if c.display_name.is_empty(){s.clone()}else{c.display_name},"avatar":c.avatar,"live":c.live,"viewers":c.viewers,"title":c.title,"chatroomId":if p==Platform::Twitch {Some(s.clone())}else{c.chatroom},"points":if known{c.points}else{None},"watching":c.watching_since.is_some(),"ageGate":c.age_gate,"earning":earning,"following":if known{c.following}else{None},"subscribed":known&&c.subscribed,"multiplier":if known&&c.multiplier>0.{c.multiplier}else{1.},"gained":if known{c.gained}else{0},"goal":if known{Some(goal)}else{None},"goalLeft":if known{Some(left)}else{None},"costs":{"xp":costs[0],"capture":costs[1],"lure":costs[2]},"targetCost":goal.saturating_sub(c.points.unwrap_or(0)/goal.max(1)*goal),"hasBonus":c.rewards.iter().any(|r|r.available),"rewardsLoaded":true,"rewards":c.rewards.iter().filter(|r|r.available).collect::<Vec<_>>(),"chest":self.logged_in&&c.claim.is_some(),"chestState":if self.auto_chest&&c.chest_error.is_some(){Some("retry")}else{None},"chestError":c.chest_error,"priceChange":null,"pointsEnabled":c.points_enabled,"watchedMin":if self.logged_in{(c.watched_ms+c.watching_since.map(|t|now.saturating_sub(t)).unwrap_or(0))/60000}else{0},"error":c.error})
+            let c=self.status.get(s).cloned().unwrap_or_default();let known=self.logged_in && c.points.is_some();let(_,goal,left)=c.rank(&self.bonus_target);let costs=c.costs();let earning=c.earning(now);let target_cost=c.target_cost(&self.bonus_target);
+            json!({"slug":s,"displayName":if c.display_name.is_empty(){s.clone()}else{c.display_name},"avatar":c.avatar,"live":c.live,"viewers":c.viewers,"title":c.title,"chatroomId":if p==Platform::Twitch {Some(s.clone())}else{c.chatroom},"points":if known{c.points}else{None},"watching":c.watching_since.is_some(),"ageGate":c.age_gate,"video":c.video,"earning":earning,"following":if known{c.following}else{None},"subscribed":known&&c.subscribed,"multiplier":if known&&c.multiplier>0.{c.multiplier}else{1.},"gained":if known{c.gained}else{0},"goal":if known{Some(goal)}else{None},"goalLeft":if known{Some(left)}else{None},"costs":{"xp":costs[0],"capture":costs[1],"lure":costs[2]},"targetCost":target_cost,"hasBonus":c.rewards.iter().any(|r|r.available),"rewardsLoaded":true,"rewards":c.rewards.iter().filter(|r|r.available).collect::<Vec<_>>(),"chest":self.logged_in&&c.claim.is_some(),"chestState":if self.auto_chest&&c.chest_error.is_some(){Some("retry")}else{None},"chestError":c.chest_error,"priceChange":null,"pointsEnabled":c.points_enabled,"watchedMin":if self.logged_in{(c.watched_ms+c.watching_since.map(|t|now.saturating_sub(t)).unwrap_or(0))/60000}else{0},"error":c.error})
         }).collect();
-        json!({"accountId":self.id.0,"farming":self.farming,"watchAll":false,"maxWatchers":self.max_watchers,"lowQuality":self.low_quality,"rotation":self.rotation,"bonusTarget":if self.bonus_target.is_null(){if p==Platform::Twitch{json!("")}else{json!(0)}}else{self.bonus_target.clone()},"bonusOptions":[],"openAtLogin":false,"platform":"win32","notifyBonus":false,"notifyChat":false,"notifyChest":false,"autoChest":self.auto_chest,"favorites":self.favorites,"username":if self.logged_in{self.identity.as_ref().map(|i|i.username.clone())}else{None},"loggedIn":self.logged_in,"sessionChecking":self.session_checking,"version":"0.1.0-prototype","intro":null,"today":if self.logged_in{self.today}else{0},"chestsToday":if self.logged_in{self.chests}else{0},"bonuses":[],"purchases":[],"storeSequence":null,"channels":channels,"memoryMB":null,"prototype":true,"error":self.error})
+        json!({"accountId":self.id.0,"farming":self.farming,"watchAll":false,"maxWatchers":self.max_watchers,"lowQuality":self.low_quality,"rotation":self.rotation,"bonusTarget":if self.bonus_target.is_null(){if p==Platform::Twitch{json!("")}else{json!(0)}}else{self.bonus_target.clone()},"bonusOptions":if p==Platform::Twitch{self.bonus_options()}else{vec![]},"openAtLogin":false,"platform":"win32","notifyBonus":false,"notifyChat":false,"notifyChest":false,"autoChest":self.auto_chest,"favorites":self.favorites,"username":if self.logged_in{self.identity.as_ref().map(|i|i.username.clone())}else{None},"loggedIn":self.logged_in,"sessionChecking":self.session_checking,"version":"0.1.0-prototype","intro":null,"today":if self.logged_in{self.today}else{0},"chestsToday":if self.logged_in{self.chests}else{0},"bonuses":[],"purchases":[],"storeSequence":null,"channels":channels,"memoryMB":null,"prototype":true,"error":self.error})
     }
 }
 pub fn now() -> u64 {

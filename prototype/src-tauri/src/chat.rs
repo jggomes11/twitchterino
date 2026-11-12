@@ -52,14 +52,15 @@ pub async fn receive(app: AppHandle, id: AccountId) {
         }
         let enabled = {
             let rt = app.state::<Runtime>();
-            rt.account(&id, |a| a.used)
+            (rt.account(&id, |a| a.used) || rt.is_selected(&id))
         };
         if !enabled {
             tokio::time::sleep(Duration::from_secs(5)).await;
             continue;
         }
         if let Ok((mut ws, _)) = connect_async("wss://irc-ws.chat.twitch.tv:443").await {
-            let _=ws.send(Message::Text("CAP REQ :twitch.tv/tags twitch.tv/commands\r\nPASS SCHMOOPIIE\r\nNICK justinfan61435\r\n".into())).await;
+            let nickname = 10_000 + (crate::model::now() + id.index() as u64 * 2197) % 80_000;
+            let _=ws.send(Message::Text(format!("CAP REQ :twitch.tv/tags twitch.tv/commands\r\nPASS SCHMOOPIIE\r\nNICK justinfan{nickname}\r\n").into())).await;
             let mut joined = std::collections::BTreeSet::<String>::new();
             let mut interval = tokio::time::interval(Duration::from_secs(5));
             loop {
