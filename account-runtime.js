@@ -130,8 +130,11 @@ function isHiddenWatcher(webContents) {
 
 const ALLOWED_PERMISSIONS = new Set(['fullscreen', 'clipboard-sanitized-write']);
 let authRefreshTimer = null;
+let sessionSetup=false;
 
 function setupSession() {
+  if(sessionSetup)return;
+  sessionSetup=true;
   const ses = session.fromPartition(PARTITION);
   ses.setSpellCheckerEnabled(false);
   ses.setUserAgent(app.userAgentFallback);
@@ -142,7 +145,7 @@ function setupSession() {
   // Cookie events describe storage operations, not whether an account signed out.
   // Check the cookie actually selected by our API before changing the displayed session.
   ses.cookies.on('changed', (_e, changedCookie) => {
-    if (sessionTransition) return;
+    if (disposed || sessionTransition) return;
     if (changedCookie.name !== 'auth-token' || !['twitch.tv', 'www.twitch.tv'].includes(changedCookie.domain.replace(/^\./, ''))) return;
     timers.cancel(authRefreshTimer);
     authRefreshTimer = null;
@@ -157,7 +160,7 @@ function setupSession() {
       authRefreshTimer = null;
       try {
         const token = await authToken();
-        if (sessionTransition || generation !== apiClient.generation || !apiWin || apiWin.isDestroyed()) return;
+        if (disposed || sessionTransition || generation !== apiClient.generation) return;
         cookieCheckPending = false;
         if (!token) {
           verifiedTokenDigest = null;
@@ -175,7 +178,6 @@ function setupSession() {
         } else {
           cancelAccountWindows();
         }
-        if (apiWin.isVisible()) { apiWin.hide(); void loadApi(LIGHT_URL); }
         notifyState();
         if (loggedIn) reconcileWatchers();
         await poll();
@@ -208,33 +210,39 @@ function lowestQualityOnly(playlist) {
   return [...keep.filter((l) => l.trim()), ...video[0]].join('\n') + '\n';
 }
 
-// Página "vazia" em twitch.tv: mesma origem e cookies, sem carregar o site inteiro.
-const LIGHT_URL = `${TWITCH}/robots.txt`;
-
-
-function loadApi(url) {
-  apiReady = new Promise((resolve) => apiWin.webContents.once('did-finish-load', resolve));
-  apiWin.loadURL(url).catch(() => {});
-  return apiReady;
+// The native API uses the Session directly; a renderer is needed only for official login.
+function releaseLoginWindow(win=apiWin) {
+  if(!win)return;
+  if(apiWin===win){apiWin=null;apiReady=null;}
+  if(!win.isDestroyed())win.destroy();
 }
-
 function createApiWindow() {
-  apiWin = new BrowserWindow({
-    width: 1000, height: 780, show: false, title: 'Twitch — login', autoHideMenuBar: true,
-    icon: path.join(__dirname, 'build', 'icon.png'),
-    webPreferences: { partition: PARTITION, backgroundThrottling: false },
+  if(disposed || sessionTransition)throw new Error('Session changed');
+  if(apiWin && !apiWin.isDestroyed())return apiWin;
+  const win=new BrowserWindow({
+    width:1000,height:780,show:false,title:'Twitch — login',autoHideMenuBar:true,
+    icon:path.join(__dirname,'build','icon.png'),
+    webPreferences:{partition:PARTITION,backgroundThrottling:false},
   });
-  apiWin.webContents.setAudioMuted(true);
-  const retryApi = () => later(() => { if (!apiWin.isVisible()) loadApi(LIGHT_URL); }, 30 * 1000);
-  apiWin.webContents.on('did-fail-load', (_e, code, _desc, _url, isMainFrame) => { if (isMainFrame && code !== -3) retryApi(); });
-  apiWin.webContents.on('render-process-gone', retryApi);
-  loadApi(LIGHT_URL);
-  apiWin.on('close', (e) => {
-    if (app.isQuitting) return;
-    e.preventDefault();
-    apiWin.hide();
-    loadApi(LIGHT_URL).then(poll);
+  apiWin=win;apiReady=null;
+  win.webContents.setAudioMuted(true);
+  win.webContents.on('render-process-gone',()=>releaseLoginWindow(win));
+  win.on('closed',()=>{
+    if(apiWin===win){apiWin=null;apiReady=null;}
+    if(!disposed && !sessionTransition)void poll();
   });
+  return win;
+}
+function loadApi(url,win=apiWin) {
+  if(disposed || sessionTransition || !win || win.isDestroyed())return Promise.reject(new Error('Session changed'));
+  if(apiReady)return apiReady;
+  let onClosed;
+  const closed=new Promise((_,reject)=>{onClosed=()=>reject(new Error('Session changed'));win.once('closed',onClosed);});
+  const task=withTimeout(Promise.race([Promise.resolve().then(()=>win.loadURL(url)),closed]),45000)
+    .catch(()=>{if(!disposed && !sessionTransition && apiWin===win && !win.isDestroyed())throw new Error('Não foi possível abrir o login da Twitch. Tente novamente.');})
+    .finally(()=>{win.removeListener('closed',onClosed);if(apiReady===task)apiReady=null;});
+  apiReady=task;
+  return task;
 }
 
 async function cookie(name) {
@@ -1298,11 +1306,10 @@ async function poll() {
     step('consulta ok', [...status.values()].filter((s) => s.live).length, 'ao vivo');
     loggedIn = !!token && verifiedAccountGeneration === generation;
     sessionChecking = false;
-    if (loggedIn) verifiedTokenDigest = tokenDigest(token);
+    if (loggedIn) {verifiedTokenDigest = tokenDigest(token);releaseLoginWindow();}
     if (!token) { username = null; verifiedTokenDigest = null; }
     queueAvailableChests();
     if (configDirty) { configDirty = false; saveConfig(); }
-    if (config.channels.length && config.channels.every((slug) => (status.get(slug) || {}).error) && !apiWin.isVisible()) loadApi(LIGHT_URL);
     advanceLimitTest();
     reconcileWatchers();
     step('lives', watchers.size);
@@ -1347,8 +1354,8 @@ function setFarming(on) {
 }
 
 function recoverAfterResume() {
+  if(disposed)return;
   for (const slug of [...watchers.keys()]) if (!isShown(slug)) stopWatcher(slug);
-  if (!apiWin.isVisible()) loadApi(LIGHT_URL);
   later(poll, 15 * 1000);
 }
 
@@ -1436,8 +1443,9 @@ handleIpc('lowQuality:set', (_e, on) => {
 });
 handleIpc('refresh', async () => { await poll(); return snapshot(); });
 handleIpc('login:show', async () => {
-  apiWin.show(); apiWin.focus();
-  await loadApi(`${TWITCH}/login`);
+  const win=createApiWindow();
+  win.show();win.focus();
+  await loadApi(`${TWITCH}/login`,win);
 });
 handleIpc('logout', async () => {
   const { response } = await dialog.showMessageBox(mainWin, {
@@ -1454,7 +1462,7 @@ handleIpc('logout', async () => {
   cookieCheckPending = false;
   apiClient.suspend();
   try {
-    apiWin.webContents.stop();
+    releaseLoginWindow();
     resetAccountRuntime();
     verifiedAccountGeneration = -1;
     if (ircSend) { try { ircSend.close(); } catch {} ircSend = null; }
@@ -1466,7 +1474,6 @@ handleIpc('logout', async () => {
     status.clear();
     username = null;
     loggedIn = false;
-    loadApi(LIGHT_URL);
   } finally {
     sessionTransition = false;
     apiClient.resume();
@@ -1501,9 +1508,8 @@ function start(mainWindow) {
   loadConfig();
   setupSession();
   syncKeepAwake();
-  createApiWindow();
   connectChat();
-  apiReady.then(poll);
+  void poll();
   timers.every(poll, POLL_MS);
   timers.every(() => { checkBonusEnding(); updateTray(); }, 30 * 1000);
   later(syncPartners, 30 * 1000);
@@ -1518,7 +1524,7 @@ function stop() {
   resetAccountRuntime();
   if (irc) { try { irc.close(); } catch {} }
   if (ircSend) { try { ircSend.close(); } catch {} }
-  if (apiWin && !apiWin.isDestroyed()) apiWin.destroy();
+  releaseLoginWindow();
   if (awakeBlocker != null) { powerSaveBlocker.stop(awakeBlocker); awakeBlocker = null; }
 }
 const runtime = {

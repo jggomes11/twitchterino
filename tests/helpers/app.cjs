@@ -106,7 +106,7 @@ function loadApp({ packaged = false, platform = 'win32', configSeed = null, sing
   };
   vm.createContext(context);
   const runtimeSource = fs.readFileSync(path.join(root, 'account-runtime.js'), 'utf8')
-    .replace('return runtime;', 'runtime.__test = { query: gql, poll, snapshot, setupSession, sendChat, watchRedemptions, setUsername(value) { username = value; }, setup(main, api) { mainWin = main; apiWin = api; apiReady = Promise.resolve(); }, chestScript: FIND_CHEST, status, get config() { return config; }, get client() { return apiClient; } }; return runtime;');
+    .replace('return runtime;', 'runtime.__test = { query: gql, poll, snapshot, setupSession, sendChat, watchRedemptions, setUsername(value) { username = value; }, setup(main, api) { mainWin = main; apiWin = api; apiReady = null; }, chestScript: FIND_CHEST, status, get config() { return config; }, get client() { return apiClient; } }; return runtime;');
   const runtimeContainer = { exports: {} };
   vm.runInContext('(function(require,module,__dirname){' + runtimeSource + '\n})', context, { filename: path.join(root, 'account-runtime.js') })(context.require, runtimeContainer, root);
   const runtimeModule = runtimeContainer.exports;
@@ -136,7 +136,12 @@ function loadApp({ packaged = false, platform = 'win32', configSeed = null, sing
       for (const timer of timers) if (!timer.cancelled) await timer.callback();
       await new Promise(resolve => setImmediate(resolve));
     },
-    async start() { for (const callback of state.ready) await callback(); await new Promise(resolve => setImmediate(resolve)); },
+    async start() {
+      // Real startup has no login window; the placeholder above is only for legacy unit callers.
+      apiExports.setup(main,null);
+      for (const callback of state.ready) await callback();
+      await new Promise(resolve => setImmediate(resolve));
+    },
   };
 }
 module.exports = { loadApp };

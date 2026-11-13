@@ -77,6 +77,7 @@ test('account IPC validates slot and channel ownership before dispatch and rejec
 
 test('official popups keep their source session after another account is selected', async () => {
   const app=loadApp(); await app.start();
+  await app.runtimes[1].invoke('login:show',app.event(),[]);
   const login=app.state.windows.find(w=>w.options.webPreferences?.partition==='persist:twitch-account-2');
   app.manager.select('account-4');
   const options=login.webContents.openHandler({url:'https://accounts.google.com/ServiceLogin'});

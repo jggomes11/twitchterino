@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs'); const path = require('node:path'); const os = require('node:os'); const net = require('node:net');
 const { spawn, spawnSync } = require('node:child_process');
 const { isRunning } = require('./profile-process.cjs');
-const { connect, evaluate } = require('./cdp-client.cjs');
+const { connect, evaluate, closePage } = require('./cdp-client.cjs');
 const { assertAccountReady, quitApplication } = require('./account-fixture.cjs');
 const pkg = require('../package.json');
 assert.equal(process.platform, 'win32', 'Validate account partitions on native Windows');
@@ -87,6 +87,10 @@ async function markers(api) {
   try {
     assert(fs.existsSync(executable), 'Missing packaged executable');
     current = await open(launch(await freePort()));
+    await select(current,1);
+    assert.equal((await current.targets()).filter(t=>t.type==='page'&&t.url.startsWith('https://www.twitch.tv/')).length,0,
+      'Empty slots must not allocate official login renderers at startup');
+    report.checks.push('startup restores metadata without creating login renderers');
     const apis = [];
     for (let index = 1; index <= 4; index++) {
       await select(current, index);
@@ -99,6 +103,9 @@ async function markers(api) {
     for (let index = 0; index < 4; index++) assert.deepEqual(await markers(apis[index].api), ['FAKE_ACCOUNT_' + (index + 1)]);
     assert.equal((await current.targets()).filter(t => /\/renderer\/index\.html$/.test(t.url)).length, 1);
     report.checks.push('one main UI with four ready account controls', 'four distinct login windows and session cookie jars');
+    for(const source of apis)await closePage(source.api);
+    await until(async()=>(await current.targets()).every(t=>t.type!=='page'||!t.url.startsWith('https://www.twitch.tv/')),'Login documents released');
+    report.checks.push('closing login documents releases their renderers');
     await select(current, 2);
     await evaluate(current.ui, 'window.tt.setNotifyChat(false)');
     await select(current, 3);
