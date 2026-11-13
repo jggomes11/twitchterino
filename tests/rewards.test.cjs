@@ -10,6 +10,7 @@ const rewards = [
 ];
 async function fixture(shop = rewards) {
   const app = loadApp();
+  let reply={data:{redeemCustomReward:{redemption:{id:'redemption'}}}};
   let points = 10000;
   const slug = app.apiExports.config.channels[0];
   app.session.fetch = async (_url, init) => {
@@ -26,13 +27,14 @@ async function fixture(shop = rewards) {
   const dbg = new EventEmitter();
   dbg.isAttached = () => true;
   dbg.sendCommand = async method => method === 'Network.getResponseBody'
-    ? { body: JSON.stringify({ data: { redeemCustomReward: { redemption: { id: 'redemption' } } } }) } : {};
+    ? { body: JSON.stringify(reply) } : {};
   app.apiExports.watchRedemptions(slug, { debugger: dbg, isDestroyed: () => false });
-  return { app, async spend(amount = 5000) { points -= amount; await app.apiExports.poll(); },
-    request(input) { dbg.emit('message', {}, 'Network.requestWillBeSent', { requestId: 'redeem', request: {
+  return { app, response(value){reply=value;}, async spend(amount = 5000) { points -= amount; await app.apiExports.poll(); },
+    fail(){dbg.emit('message',{},'Network.loadingFailed',{requestId:'redeem'});},
+    request(input,requestId='redeem') { dbg.emit('message', {}, 'Network.requestWillBeSent', { requestId, request: {
       url: 'https://gql.twitch.tv/gql', postData: JSON.stringify({ operationName: 'RedeemCustomReward', variables: { input } }),
     } }); },
-    async finish() { dbg.emit('message', {}, 'Network.loadingFinished', { requestId: 'redeem' }); await new Promise(resolve => setImmediate(resolve)); },
+    async finish(requestId='redeem') { dbg.emit('message', {}, 'Network.loadingFinished', { requestId }); await new Promise(resolve => setImmediate(resolve)); },
   };
 }
 
@@ -69,6 +71,45 @@ test('a balance drop still detects a uniquely priced external Capture purchase',
   assert.equal(f.app.apiExports.config.purchases.length, 1);
   assert.equal(f.app.apiExports.config.purchases[0].kind, 'capture');
   assert.equal(f.app.apiExports.config.purchases[0].hours, 10);
+});
+
+test('a unique balance drop before shop confirmation is not an extra purchase',async()=>{
+  const f=await fixture([rewards[0]]);
+  f.request({rewardID:'capture-10',cost:5000});
+  await f.spend();
+  assert.equal(f.app.apiExports.config.purchases.length,0,'an in-flight shop purchase waits for its response');
+  await f.finish();
+  assert.equal(f.app.apiExports.config.purchases.length,1);
+  assert.equal(f.app.apiExports.config.purchases[0].hours,10);
+});
+
+test('failed and unconfirmed shop responses cannot turn a deferred drop into a boost',async()=>{
+  for(const reply of [
+    {data:{redeemCustomReward:{redemption:null}}},
+    {errors:[{message:'failed'}],data:{redeemCustomReward:{redemption:{id:'bad'}}}},
+    {data:{redeemCustomReward:{error:{code:'failed'},redemption:{id:'bad'}}}},
+  ]){
+    const f=await fixture([rewards[0]]);f.response(reply);
+    f.request({rewardID:'capture-10',cost:5000});await f.spend();await f.finish();
+    assert.equal(f.app.apiExports.config.purchases.length,0);
+    await f.spend();assert.equal(f.app.apiExports.config.purchases.length,1,'a later independent external purchase remains detectable');
+  }
+});
+
+test('network failure and timeout release an in-flight redemption',async()=>{
+  for(const timedOut of [false,true]){
+    const f=await fixture([rewards[0]]);f.request({rewardID:'capture-10',cost:5000});
+    if(timedOut)await f.app.fireTimers(60000);else f.fail();
+    await f.spend();assert.equal(f.app.apiExports.config.purchases.length,1);
+  }
+});
+
+test('replaying a confirmed redemption ID cannot add another boost or consume a later purchase',async()=>{
+  const f=await fixture([rewards[0]]);
+  f.request({rewardID:'capture-10',cost:5000});await f.finish();await f.spend();
+  f.request({rewardID:'capture-10',cost:5000},'retry');await f.finish('retry');
+  assert.equal(f.app.apiExports.config.purchases.length,1);
+  await f.spend();assert.equal(f.app.apiExports.config.purchases.length,2);
 });
 
 for (const [title, kind, hours] of [

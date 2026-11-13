@@ -23,6 +23,8 @@ const apiClient = createPlatformClient('twitch', () => session.fromPartition(PAR
 const timers=createTimers({setTimeout,clearTimeout,setInterval,clearInterval});
 const later=timers.after;
 const withTimeout=timers.withTimeout;
+const observedRedemptions=new Set();
+const redemptionPages=new WeakMap();
 let sessionTransition = false;
 let verifiedAccountGeneration = -1;
 let verifiedTokenDigest = null;
@@ -47,6 +49,7 @@ function resetAccountRuntime() {
   cancelAccountWindows();
   for (const slug of [...watchers.keys()]) stopWatcher(slug);
   confirmedChestClaims.clear();
+  observedRedemptions.clear();
   status.clear();
 }
 
@@ -106,6 +109,7 @@ function saveConfig() {
 let mainWin = null;
 let apiWin = null;
 let apiReady = null;
+let loginStartedForAccount = null;
 const watchers = new Map(); // slug -> BrowserWindow
 const status = new Map();   // slug -> estado do canal
 
@@ -213,7 +217,7 @@ function lowestQualityOnly(playlist) {
 // The native API uses the Session directly; a renderer is needed only for official login.
 function releaseLoginWindow(win=apiWin) {
   if(!win)return;
-  if(apiWin===win){apiWin=null;apiReady=null;}
+  if(apiWin===win){apiWin=null;apiReady=null;loginStartedForAccount=null;}
   if(!win.isDestroyed())win.destroy();
 }
 function createApiWindow() {
@@ -225,10 +229,11 @@ function createApiWindow() {
     webPreferences:{partition:PARTITION,backgroundThrottling:false},
   });
   apiWin=win;apiReady=null;
+  loginStartedForAccount=loggedIn&&verifiedAccountGeneration===apiClient.generation?config.reportAccount:null;
   win.webContents.setAudioMuted(true);
   win.webContents.on('render-process-gone',()=>releaseLoginWindow(win));
   win.on('closed',()=>{
-    if(apiWin===win){apiWin=null;apiReady=null;}
+    if(apiWin===win){apiWin=null;apiReady=null;loginStartedForAccount=null;}
     notifyState();
     if(!disposed && !sessionTransition)void poll();
   });
@@ -408,6 +413,11 @@ function registerDrop(slug, s, drop) {
   s.pendingSpent = (s.pendingSpent || 0) - known;
   drop -= known;
   if (drop < 100) return; // restos de arredondamento ou recompensas baratas que não são bônus
+  if(s.redemptionEpoch===apiClient.generation && s.pendingRedemptions>0) {
+    const deferred=s.deferredRedemptionDrops||(s.deferredRedemptionDrops=[]);
+    if(deferred.length<8)deferred.push(drop);else deferred[7]+=drop;
+    return;
+  }
   const now = Date.now();
   matchPurchase(drop, s.rewards || []).forEach((r, i) => addPurchase({ t: now + i, kind: r.kind, hours: r.hours, cost: r.cost, slug }));
 }
@@ -416,8 +426,29 @@ function registerDrop(slug, s, drop) {
 // app lê o pedido e a resposta. Assim sabe exatamente qual bônus e quantas horas.
 function watchRedemptions(slug, wc) {
   const dbg = wc.debugger;
+  if(redemptionPages.get(wc)===dbg)return;
   if (!dbg.isAttached()) { try { dbg.attach('1.3'); } catch { return; } }
+  redemptionPages.set(wc,dbg);
   const pending = new Map();
+  function finish(operation,cost=0,failed=true) {
+    if(operation.finished)return;
+    operation.finished=true;pending.delete(operation.requestId);timers.cancel(operation.timer);
+    const s=status.get(slug);
+    if(s!==operation.channel || operation.generation!==apiClient.generation || s.redemptionEpoch!==operation.generation)return;
+    s.pendingRedemptions=Math.max(0,(s.pendingRedemptions||0)-1);
+    if(cost>0)s.pendingSpent=(s.pendingSpent||0)+cost;
+    if(failed)s.unconfirmedRedemption=true;
+    if(s.pendingRedemptions===0) {
+      const drops=s.deferredRedemptionDrops||[];s.deferredRedemptionDrops=[];
+      for(const drop of drops) {
+        if(s.unconfirmedRedemption) {
+          const known=Math.min(drop,s.pendingSpent||0);s.pendingSpent=(s.pendingSpent||0)-known;
+        }else registerDrop(slug,s,drop);
+      }
+      s.unconfirmedRedemption=false;
+    }
+  }
+  wc.once?.('destroyed',()=>{for(const operation of [...pending.values()])finish(operation);});
   dbg.on('message', async (_e, method, p) => {
     if (sessionTransition || wc.isDestroyed()) return;
     const generation = apiClient.generation;
@@ -430,27 +461,43 @@ function watchRedemptions(slug, wc) {
         const ops = [].concat(JSON.parse(body));
         const op = ops.find((o) => o.operationName === 'RedeemCustomReward');
         const input = op && op.variables && op.variables.input;
-        if (input) pending.set(p.requestId, { input, generation });
+        if (input && !pending.has(p.requestId)) {
+          if(pending.size>=64)finish(pending.values().next().value);
+          const s=status.get(slug)||{};
+          if(s.redemptionEpoch!==generation){s.redemptionEpoch=generation;s.pendingRedemptions=0;s.deferredRedemptionDrops=[];s.unconfirmedRedemption=false;}
+          s.pendingRedemptions++;
+          status.set(slug,s);
+          const operation={input,generation,channel:s,requestId:p.requestId};
+          pending.set(p.requestId,operation);
+          operation.timer=later(()=>finish(operation),60000);
+        }
       } catch {}
+    } else if (method === 'Network.loadingFailed' && pending.has(p.requestId)) {
+      finish(pending.get(p.requestId));
     } else if (method === 'Network.loadingFinished' && pending.has(p.requestId)) {
       const operation = pending.get(p.requestId);
+      if(operation.readingResponse)return;
+      operation.readingResponse=true;
       const input = operation.input;
-      pending.delete(p.requestId);
       const res = await dbg.sendCommand('Network.getResponseBody', { requestId: p.requestId }).catch(() => null);
-      if (!res || operation.generation !== apiClient.generation || verifiedAccountGeneration !== apiClient.generation || sessionTransition || wc.isDestroyed()) return;
-      let ok = false;
+      if (!res || operation.finished || operation.channel!==status.get(slug) || operation.generation !== apiClient.generation || verifiedAccountGeneration !== apiClient.generation || sessionTransition || wc.isDestroyed()) {finish(operation);return;}
+      let ok = false,redemptionId=null;
       try {
         const r = [].concat(JSON.parse(res.base64Encoded ? Buffer.from(res.body, 'base64').toString() : res.body))
           .find((x) => x.data && 'redeemCustomReward' in x.data);
-        ok = !!r && !!r.data.redeemCustomReward && !r.data.redeemCustomReward.error;
+        const redemption=r?.data?.redeemCustomReward?.redemption;
+        ok = !!r && !r.errors?.length && !!redemption && !Array.isArray(redemption) && !r.data.redeemCustomReward.error;
+        if(typeof redemption?.id==='string'&&redemption.id.length<=128)redemptionId=redemption.id;
       } catch {}
-      if (!ok) return;
+      if (!ok || (redemptionId && observedRedemptions.has(redemptionId))) {finish(operation);return;}
       const s = status.get(slug) || {};
-      s.pendingSpent = (s.pendingSpent || 0) + (Number(input.cost) || 0);
       // The reward ID is authoritative; request titles can be absent or stale.
       const reward = (s.rewards || []).find((r) => r.id && r.id === input.rewardID)
         || parseRewards([{ title: input.title, cost: input.cost, isEnabled: true }])[0];
-      if (reward) addPurchase({ t: Date.now(), kind: reward.kind, hours: reward.hours, cost: reward.cost, slug });
+      const cost=Number(input.cost)||Number(reward?.cost)||0;
+      if(redemptionId){observedRedemptions.add(redemptionId);if(observedRedemptions.size>256)observedRedemptions.delete(observedRedemptions.values().next().value);}
+      if (reward) addPurchase({ t: Date.now(), kind: reward.kind, hours: reward.hours, cost: Number.isFinite(cost)&&cost>0?cost:reward.cost, slug });
+      finish(operation,Number.isFinite(cost)&&cost>0?cost:0,false);
       status.set(slug, s);
       if (configDirty) { configDirty = false; saveConfig(); }
       notifyState();
@@ -560,7 +607,7 @@ async function refreshAll() {
   const slugs = config.channels.filter((s) => LOGIN_RE.test(s));
   const fresh = [];
   // A Twitch aceita no máximo 15 consultas por chamada: vai de 10 em 10.
-  for (let i = 0; i < slugs.length; i += 10) {
+  for (let i = 0; i < Math.max(1,slugs.length); i += 10) {
     const part = slugs.slice(i, i + 10);
     const query = `query{ ${i === 0 ? 'currentUser{ id login displayName }' : ''} ${part.map((slug, j) => `c${j}: user(login: ${JSON.stringify(slug)}){ ${CHANNEL_FIELDS} }`).join(' ')} }`;
     let data = null, err = null;
@@ -570,6 +617,8 @@ async function refreshAll() {
       data = json.data;
     } catch (e) { err = String(e.message || e); }
     assertSession(generation);
+    // Until identity is known, keep the old baseline private and leave warming media alive.
+    if(i===0 && !data && verifiedAccountGeneration!==generation)return 'unknown';
     if (data && i === 0) {
       const user = data.currentUser;
       if (user && user.login) {
@@ -616,8 +665,7 @@ async function refreshAll() {
       if (claim && claim !== s.claim) fresh.push(slug);
       s.claim = claim || null;
       const p = cp ? cp.balance : null;
-      if (verifiedAccountGeneration !== generation) { s.points = null; s.bonusTier = null; s.targetTier = null; }
-      updateChannelBalance(slug, s, p);
+      if (verifiedAccountGeneration === generation) updateChannelBalance(slug, s, p);
       status.set(slug, s);
     });
   }
@@ -628,6 +676,7 @@ async function refreshAll() {
     const names = fresh.map((slug) => (status.get(slug) || {}).displayName || slug);
     notify(`🎁 Baú de bônus em ${names.slice(0, 3).join(', ')}${names.length > 3 ? '…' : ''}`, 'Clique para abrir o chat e pegar os pontos extras.', () => openStore(fresh[0]));
   }
+  return verifiedAccountGeneration===generation?'verified':'signed-out';
 }
 
 function updateChannelBalance(slug, s, points) {
@@ -1301,12 +1350,15 @@ async function poll() {
     assertSession(generation);
     if (token && verifiedAccountGeneration !== generation) sessionChecking = true;
     step('consulta');
-    await refreshAll();
+    const identity=await refreshAll();
     assertSession(generation);
     step('consulta ok', [...status.values()].filter((s) => s.live).length, 'ao vivo');
     loggedIn = !!token && verifiedAccountGeneration === generation;
-    sessionChecking = false;
-    if (loggedIn) {verifiedTokenDigest = tokenDigest(token);releaseLoginWindow();}
+    sessionChecking = !!token && identity==='unknown';
+    if (loggedIn) {
+      verifiedTokenDigest = tokenDigest(token);
+      if(!loginStartedForAccount || loginStartedForAccount!==config.reportAccount)releaseLoginWindow();
+    }
     if (!token) { username = null; verifiedTokenDigest = null; }
     queueAvailableChests();
     if (configDirty) { configDirty = false; saveConfig(); }
