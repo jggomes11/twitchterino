@@ -25,12 +25,13 @@ O protótipo permite até quatro contas; o ensaio principal usa uma conta e duas
 - Registre por live: saldo inicial/final, horários dos créditos, baús, compras e intervenções externas. Baú Twitch só conta como confirmado com mudança do claim e saldo correspondente. Se não surgir baú, a prova continua pendente.
 - Compare UI aberta e bandeja, interrupção de rede, player encerrado e suspensão/retorno do PC.
 
-No PowerShell, obtenha o PID raiz ao abrir o executável, ou pelo Gerenciador de Tarefas:
+Abra o `.exe` normalmente, faça login e ative duas lives. Depois, abra o PowerShell na pasta extraída e execute o coletor pelo caminho do executável aberto:
 
 ```powershell
-$testApp = Start-Process '.\Twitchterino-Tauri-Prototype.exe' -PassThru
-.\Measure-Prototype.ps1 -RootProcessId $testApp.Id -WarmupSeconds 600 -DurationSeconds 1800 -OutputDirectory '.\medicao-twitch-tauri-01'
+.\Measure-Prototype.ps1 -ExecutablePath '.\Twitchterino-Tauri-Prototype.exe' -WarmupSeconds 600 -DurationSeconds 1800 -OutputDirectory '.\medicao-twitch-tauri-01'
 ```
+
+Para Kick, troque o executável por `Kickterino-Tauri-Prototype.exe` e use outra pasta de saída. O coletor mostra o PID encontrado, espera os 10 minutos de estabilização e mede por 30 minutos; mantenha o PowerShell aberto. Ele exige exatamente um processo com o mesmo caminho do arquivo indicado. Se não encontrar o aplicativo ou encontrar mais de um, interrompe com orientação antes de criar os arquivos. A opção `-RootProcessId` continua disponível para informar o PID pelo Gerenciador de Tarefas.
 
 O coletor registra memória privada comprometida (`privateBytes`), RAM privada residente (`residentPrivateBytes`, quando o contador Windows está disponível), working set por processo e CPU da árvore em intervalos de 5 s. O resumo agrega memória privada; working set permanece por processo para evitar tratar páginas compartilhadas somadas como memória única. GPU/decoder e rede ficam explicitamente sem medição pelo script; use ferramentas Windows apropriadas se disponíveis e registre o método. Não publicar perfis, cookies, tokens ou mensagens privadas.
 

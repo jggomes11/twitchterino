@@ -1,11 +1,23 @@
-[CmdletBinding()]
+﻿[CmdletBinding(DefaultParameterSetName='ById')]
 param(
-  [Parameter(Mandatory=$true)][ValidateRange(1,2147483647)][int]$RootProcessId,
+  [Parameter(Mandatory=$true,ParameterSetName='ById')][ValidateRange(1,2147483647)][int]$RootProcessId,
+  [Parameter(Mandatory=$true,ParameterSetName='ByPath')][ValidateNotNullOrEmpty()][string]$ExecutablePath,
   [ValidateRange(0,86400)][int]$WarmupSeconds=600,
   [ValidateRange(5,172800)][int]$DurationSeconds=1800,
   [Parameter(Mandatory=$true)][string]$OutputDirectory
 )
 $ErrorActionPreference='Stop'
+if ($PSCmdlet.ParameterSetName -eq 'ByPath') {
+  $executable = Get-Item -LiteralPath $ExecutablePath -ErrorAction Stop
+  if ($executable -isnot [IO.FileInfo]) { throw 'Informe o caminho do arquivo executável.' }
+  $candidateProcesses = @(Get-Process | Where-Object {
+    try { [string]::Equals($_.Path, $executable.FullName, [StringComparison]::OrdinalIgnoreCase) } catch { $false }
+  })
+  if ($candidateProcesses.Count -eq 0) { throw 'Abra o aplicativo pelo .exe desta pasta e execute a medição novamente.' }
+  if ($candidateProcesses.Count -gt 1) { throw 'Mais de um processo usa esse executável. Informe -RootProcessId com o PID desejado.' }
+  $RootProcessId = $candidateProcesses[0].Id
+}
+$rootStarted=(Get-Process -Id $RootProcessId -ErrorAction Stop).StartTime.ToUniversalTime().Ticks
 New-Item -ItemType Directory -Force $OutputDirectory | Out-Null
 $csvPath=Join-Path $OutputDirectory 'processes.csv'
 $summaryPath=Join-Path $OutputDirectory 'summary.json'
@@ -13,8 +25,8 @@ if (Test-Path $csvPath) { throw 'Use uma pasta nova para não misturar rodadas.'
 $logicalProcessors=[Environment]::ProcessorCount
 $os=Get-CimInstance Win32_OperatingSystem
 $graphics=@(Get-CimInstance Win32_VideoController | Select-Object Name,DriverVersion)
-$rootStarted=(Get-Process -Id $RootProcessId).StartTime.ToUniversalTime().Ticks
 @{ startedUtc=[DateTime]::UtcNow.ToString('o'); rootProcessId=$RootProcessId; sampleSeconds=5; warmupSeconds=$WarmupSeconds; durationSeconds=$DurationSeconds; logicalProcessors=$logicalProcessors; windows=$os.Caption; windowsVersion=$os.Version; physicalMemoryBytes=[long]$os.TotalVisibleMemorySize*1024; graphics=$graphics; gpuMeasured=$false; networkMeasured=$false; credentialsRead=$false } | ConvertTo-Json | Set-Content (Join-Path $OutputDirectory 'environment.json')
+Write-Host "Aplicativo encontrado: PID $RootProcessId. Estabilização: $WarmupSeconds s; medição: $DurationSeconds s. Mantenha este PowerShell aberto."
 $warmupEnd=[DateTime]::UtcNow.AddSeconds($WarmupSeconds)
 while ([DateTime]::UtcNow -lt $warmupEnd) {
   if (-not (Get-Process -Id $RootProcessId -ErrorAction SilentlyContinue)) { throw 'O aplicativo encerrou durante a estabilização.' }
