@@ -25,6 +25,13 @@ jobs:
         with:
           workspaces: prototype/src-tauri
           cache-on-failure: true
+      - name: Test metrics process selection in both PowerShell versions
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force prototype/output | Out-Null
+          & ./prototype/tests/metrics.test.ps1 -ProofPath ./prototype/output/metrics-pwsh.json
+          & powershell.exe -NoProfile -File ./prototype/tests/metrics.test.ps1 -ProofPath ./prototype/output/metrics-windows-powershell.json
+          if ($LASTEXITCODE -ne 0) { throw 'Windows PowerShell metrics tests failed' }
       - name: Prepare preserved interface
         run: node prototype/prepare-ui.cjs
       - name: Test bridge
