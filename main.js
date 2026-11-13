@@ -1,6 +1,6 @@
 'use strict';
 // One application shell; account tokens, players and reports live in scoped runtimes.
-const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, powerMonitor } = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, powerMonitor, net } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const { createHash } = require('node:crypto');
@@ -8,6 +8,8 @@ const { pathToFileURL } = require('node:url');
 const { createAccountRuntime } = require('./account-runtime');
 const { createAccountManager, ACCOUNT_IDS } = require('./account-manager');
 const { createIpcRegistrar } = require('./security/ipc');
+const { createPartnersClient } = require('./security/partners');
+const publicPartners=createPartnersClient({platform:'twitch',fetch:(url,options)=>net.fetch(url,options)});
 const UI_DOCUMENT = pathToFileURL(path.join(__dirname, 'renderer', 'index.html')).href;
 // Mantém vídeos rodando mesmo com janelas ocultas/minimizadas.
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
@@ -99,6 +101,7 @@ const runtimes = ACCOUNT_IDS.map((id, index) => createAccountRuntime({
   id, partition: index === 0 ? 'persist:twitch' : `persist:twitch-account-${index + 1}`,
   dataDirectory: index === 0 ? app.getPath('userData') : path.join(app.getPath('userData'), 'accounts', id),
   emit, onChanged: updateTray, showMain: () => showMain(id), quitApp, isOpenAtLogin, setOpenAtLogin,
+  getPartners:()=>publicPartners.get(),
 }));
 const manager = createAccountManager({ runtimes });
 
@@ -156,5 +159,5 @@ else {
     updateTray();
   });
 }
-app.on('before-quit', () => { app.isQuitting = true; clearInterval(statusInterval); runtimes.forEach(r => r.stop()); });
+app.on('before-quit', () => { app.isQuitting = true; clearInterval(statusInterval); publicPartners.stop();runtimes.forEach(r => r.stop()); });
 app.on('window-all-closed', () => app.quit());

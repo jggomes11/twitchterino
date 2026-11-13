@@ -51,3 +51,15 @@ test('unchanged bonus ticks do not rebuild the tray or read process metrics',asy
   assert.equal(app.state.trayTips.length,tipCount);
   assert.equal(app.state.metricsReads,0);
 });
+
+test('one public partner refresh updates all four configurations independently',async()=>{
+  const app=loadApp();app.state.partnerChannels=['new_partner'];await app.start();
+  await app.fireTimers(30000);
+  assert.equal(app.state.partnerRequests.length,1);
+  for(const r of app.runtimes)assert(r.__test.config.channels.includes('new_partner'));
+  app.runtimes[0].__test.config.channels.pop();
+  assert(app.runtimes[1].__test.config.channels.includes('new_partner'));
+  app.app.emit('before-quit');
+  for(const timer of app.state.timers)await timer.callback();
+  assert.equal(app.state.partnerRequests.length,1);
+});

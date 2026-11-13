@@ -10,6 +10,7 @@ function loadApp({ packaged = false, platform = 'win32', configSeed = null, sing
   const root = path.resolve(__dirname, '../..');
   const state = { scripts: [], requests: [], writes: [], quit: 0, updates: 0, windows: [], ready: [], dialogResponse: 0, sockets: [], timers: [], reloads: [] };
   state.metricsReads=0; state.intervals=[]; state.trayMenus=[]; state.trayTips=[];
+  state.partnerRequests=[];state.partnerChannels=[];
   state.paths = {}; state.loginItems = []; state.loginQueries = [];
   const cookies = new EventEmitter();
   cookies.get = async ({ name }) => [{ value: name === 'auth-token' || name === 'session_token' ? 'FAKE_ACCOUNT_TOKEN' : 'FAKE_OTHER_COOKIE' }];
@@ -85,7 +86,7 @@ function loadApp({ packaged = false, platform = 'win32', configSeed = null, sing
     Tray, Menu: { buildFromTemplate: () => ({}) }, Notification,
     nativeImage: { createFromPath: () => image, createFromDataURL: () => image },
     powerSaveBlocker: { start: () => 1, stop() {}, isStarted: () => false }, powerMonitor: new EventEmitter(),
-    net: { fetch: async () => new Response('{"channels":[]}') },
+    net: { fetch: async (url,options) => {state.partnerRequests.push({url,options});return new Response(JSON.stringify({channels:state.partnerChannels}));} },
   };
   const ownRequire = createRequire(path.join(root, 'main.js'));
   const context = {

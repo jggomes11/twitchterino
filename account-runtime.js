@@ -1,7 +1,7 @@
 'use strict';
 // Maintained single-account behavior; every invocation owns a separate closure and session.
 const {
-  app, BrowserWindow, dialog, session, Notification, powerSaveBlocker, net,
+  app, BrowserWindow, dialog, session, Notification, powerSaveBlocker,
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -14,7 +14,7 @@ const { createTimers } = require('./security/timers');
 const { pathToFileURL } = require('node:url');
 const UI_DOCUMENT = pathToFileURL(path.join(__dirname, 'renderer', 'index.html')).href;
 
-function createAccountRuntime({ id, partition, dataDirectory, emit, onChanged, showMain, quitApp, isOpenAtLogin, setOpenAtLogin }) {
+function createAccountRuntime({ id, partition, dataDirectory, emit, onChanged, showMain, quitApp, isOpenAtLogin, setOpenAtLogin, getPartners }) {
 const updateTray = () => onChanged();
 const commands = new Map();
 const handleIpc = (channel, handler) => commands.set(channel, handler);
@@ -531,12 +531,10 @@ function weeklyReport(now = Date.now()) {
 }
 
 // Lista de parceiros no site: parceiro novo entra para todos sem precisar de versão nova.
-const PARTNERS_URL = 'https://viinnisantoos.github.io/twitchterino/parceiros.json';
 async function syncPartners() {
   try {
-    const res = await net.fetch(PARTNERS_URL, { cache: 'no-store' });
-    if (!res.ok) return;
-    const list = ((await res.json()).channels || []).map((s) => String(s).toLowerCase()).filter((s) => LOGIN_RE.test(s)).slice(0, 60);
+    const list=await getPartners();
+    if(disposed)return;
     const seen = new Set(config.seenDefaults || []);
     const fresh = list.filter((slug) => !seen.has(slug) && !config.channels.includes(slug));
     config.seenDefaults = [...new Set([...seen, ...list])];
