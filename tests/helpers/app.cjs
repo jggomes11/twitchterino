@@ -9,6 +9,7 @@ const { createRequire } = require('node:module');
 function loadApp({ packaged = false, platform = 'win32', configSeed = null, singleInstance = true, env = {}, argv = [], loginRegistry = new Map() } = {}) {
   const root = path.resolve(__dirname, '../..');
   const state = { scripts: [], requests: [], writes: [], quit: 0, updates: 0, windows: [], ready: [], dialogResponse: 0, sockets: [], timers: [], reloads: [] };
+  state.metricsReads=0; state.intervals=[]; state.trayMenus=[]; state.trayTips=[];
   state.paths = {}; state.loginItems = []; state.loginQueries = [];
   const cookies = new EventEmitter();
   cookies.get = async ({ name }) => [{ value: name === 'auth-token' || name === 'session_token' ? 'FAKE_ACCOUNT_TOKEN' : 'FAKE_OTHER_COOKIE' }];
@@ -62,7 +63,7 @@ function loadApp({ packaged = false, platform = 'win32', configSeed = null, sing
   Object.assign(app, {
     commandLine: { appendSwitch() {} }, userAgentFallback: 'Chrome/100 Electron/45', isPackaged: packaged,
     getPath: name => state.paths[name] || '/fake/' + name, setPath: (name, value) => { state.paths[name] = value; }, getVersion: () => JSON.parse(fs.readFileSync(path.join(root, 'package.json'))).version,
-    requestSingleInstanceLock: () => singleInstance, quit: () => { state.quit++; }, setAppUserModelId() {}, getAppMetrics: () => [],
+    requestSingleInstanceLock: () => singleInstance, quit: () => { state.quit++; }, setAppUserModelId() {}, getAppMetrics: () => { state.metricsReads++; return []; },
     whenReady: () => ({ then: callback => { state.ready.push(callback); } }),
     getLoginItemSettings: query => {
       state.loginQueries.push(query);
@@ -75,7 +76,7 @@ function loadApp({ packaged = false, platform = 'win32', configSeed = null, sing
   });
   const handlers = new Map();
   const image = { resize() { return this; }, getSize: () => ({ width: 16, height: 16 }) };
-  class Tray extends EventEmitter { setToolTip() {} setContextMenu() {} }
+  class Tray extends EventEmitter { setToolTip(text) {state.trayTips.push(text);} setContextMenu(menu) {state.trayMenus.push(menu);} }
   class Notification extends EventEmitter { static isSupported() { return false; } show() {} }
   const electron = {
     app, BrowserWindow: Window, ipcMain: { handle: (channel, fn) => { handlers.set(channel, fn); } },
@@ -99,7 +100,9 @@ function loadApp({ packaged = false, platform = 'win32', configSeed = null, sing
     __dirname: root, module: { exports: {} }, Buffer, URL, console, AbortController, TextDecoder,
     process: { platform, env, argv, execPath: '/fake/Twitchterino.exe' },
     setTimeout: (callback, delay) => { const timer = { callback, delay, cancelled: false }; state.timers.push(timer); return timer; },
-    clearTimeout(timer) { if (timer) timer.cancelled = true; }, setInterval: () => 1, clearInterval() {}, setImmediate, queueMicrotask,
+    clearTimeout(timer) { if (timer) timer.cancelled = true; },
+    setInterval(callback,delay) {const timer={callback,delay,cancelled:false};state.intervals.push(timer);return timer;},
+    clearInterval(timer) {if(timer)timer.cancelled=true;}, setImmediate, queueMicrotask,
   };
   vm.createContext(context);
   const runtimeSource = fs.readFileSync(path.join(root, 'account-runtime.js'), 'utf8')

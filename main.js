@@ -29,6 +29,10 @@ app.userAgentFallback = app.userAgentFallback.replace(/ (Electron|twitchterino|T
 
 let mainWin = null;
 let tray = null;
+let broadcastPending = false;
+let statusInterval = null;
+let trayMenuSignature = null;
+let trayTooltip = null;
 const isLinux = process.platform === 'linux';
 const loginProfilePath = process.platform === 'win32' && customDataPath ? path.resolve(app.getPath('userData')) : null;
 const LOGIN_ITEM = {
@@ -64,13 +68,22 @@ function showMain(accountId) {
 }
 function quitApp() { app.isQuitting = true; app.quit(); }
 function broadcast() {
-  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('status', manager.snapshot());
+  if (broadcastPending || app.isQuitting || !mainWin || mainWin.isDestroyed()) return;
+  broadcastPending=true;
+  queueMicrotask(()=>{
+    broadcastPending=false;
+    if (!app.isQuitting && mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('status',manager.snapshot());
+  });
 }
 function updateTray() {
   if (!tray) return;
-  const accounts = manager.snapshot().accounts;
+  const accounts = manager.summaries();
   const watching = accounts.reduce((total, account) => total + account.watching, 0);
-  tray.setToolTip(`Twitchterino — ${accounts.filter(a => a.loggedIn).length}/4 contas · ${watching} lives`);
+  const tooltip=`Twitchterino — ${accounts.filter(a => a.loggedIn).length}/4 contas · ${watching} lives`;
+  if(tooltip!==trayTooltip){tray.setToolTip(tooltip);trayTooltip=tooltip;}
+  const signature=JSON.stringify(accounts.map(a=>[a.id,a.username||a.label]));
+  if(signature===trayMenuSignature)return;
+  trayMenuSignature=signature;
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'Abrir Twitchterino', click: () => showMain() },
     ...accounts.map(a => ({ label: a.username || a.label, click: () => showMain(a.id) })),
@@ -138,9 +151,10 @@ else {
     tray = new Tray(nativeImage.createFromPath(path.join(__dirname, 'build', 'icon.png')).resize({ width: 16, height: 16 }));
     tray.on('click', () => showMain());
     for (const runtime of runtimes) runtime.start(mainWin);
+    statusInterval=setInterval(broadcast,15*1000);
     powerMonitor.on('resume', () => runtimes.forEach(r => r.recoverAfterResume()));
     updateTray();
   });
 }
-app.on('before-quit', () => { app.isQuitting = true; runtimes.forEach(r => r.stop()); });
+app.on('before-quit', () => { app.isQuitting = true; clearInterval(statusInterval); runtimes.forEach(r => r.stop()); });
 app.on('window-all-closed', () => app.quit());

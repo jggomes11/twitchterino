@@ -106,6 +106,7 @@ const watchers = new Map(); // slug -> BrowserWindow
 const status = new Map();   // slug -> estado do canal
 
 function send(channel, payload) { emit(id, channel, payload); }
+function notifyState() { emit(id, 'status'); }
 
 // Anúncios e rastreadores de terceiros: não fazem parte da live e só gastam memória/CPU.
 const BLOCKED_HOSTS = [
@@ -160,7 +161,7 @@ function setupSession() {
           loggedIn = false;
           sessionChecking = false;
           resetAccountRuntime();
-          send('status', snapshot());
+          notifyState();
           return;
         }
         if (verifiedTokenDigest && tokenDigest(token) === verifiedTokenDigest && username) {
@@ -171,7 +172,7 @@ function setupSession() {
           cancelAccountWindows();
         }
         if (apiWin.isVisible()) { apiWin.hide(); void loadApi(LIGHT_URL); }
-        send('status', snapshot());
+        notifyState();
         if (loggedIn) reconcileWatchers();
         await poll();
       } catch {
@@ -181,7 +182,7 @@ function setupSession() {
         loggedIn = false;
         cancelAccountWindows();
         reconcileWatchers();
-        send('status', snapshot());
+        notifyState();
       }
     }, 100);
   });
@@ -441,7 +442,7 @@ function watchRedemptions(slug, wc) {
       if (reward) addPurchase({ t: Date.now(), kind: reward.kind, hours: reward.hours, cost: reward.cost, slug });
       status.set(slug, s);
       if (configDirty) { configDirty = false; saveConfig(); }
-      send('status', snapshot());
+      notifyState();
       updateTray();
     }
   });
@@ -675,10 +676,10 @@ async function runChestQueue() {
   if (!slug) return;
   if (!config.channels.includes(slug) || !(status.get(slug) || {}).claim) { void runChestQueue(); return; }
   chestBusy = slug;
-  send('status', snapshot());
+  notifyState();
   try { await claimChest(slug); } catch {}
   chestBusy = null;
-  send('status', snapshot());
+  notifyState();
   void runChestQueue();
 }
 
@@ -1002,12 +1003,12 @@ let storeSequence = null;
 function openNextStore() {
   const seq = storeSequence;
   const slug = seq && seq.queue.shift();
-  if (!slug) { storeSequence = null; send('status', snapshot()); return; }
+  if (!slug) { storeSequence = null; notifyState(); return; }
   seq.current = slug;
   seq.done++;
   const name = (status.get(slug) || {}).displayName || slug;
   openStore(slug, `Pontos — ${name} (${seq.done} de ${seq.total})`);
-  send('status', snapshot());
+  notifyState();
 }
 
 // Confere cada live oculta: aviso de conteúdo adulto (só a pessoa pode confirmar) e estado do player.
@@ -1229,6 +1230,11 @@ function limitTestSnapshot() {
   };
 }
 
+function summary() {
+  const confirmed=loggedIn && verifiedAccountGeneration===apiClient.generation;
+  return {id,username:confirmed?username:null,loggedIn,sessionChecking,farming:config.farming,
+    watching:watchers.size,today:confirmed?config.daily[dayKey(Date.now())]||0:0};
+}
 function snapshot() {
   const now = Date.now();
   const confirmedAccount = loggedIn && verifiedAccountGeneration === apiClient.generation;
@@ -1303,7 +1309,7 @@ async function poll() {
     assertSession(generation);
     step('players ok');
     logHistory();
-    send('status', snapshot());
+    notifyState();
     updateTray();
     if (process.env.TWITCHTERINO_DEBUG) {
       console.log(JSON.stringify(snapshot()));
@@ -1318,7 +1324,7 @@ async function poll() {
     if (generation === apiClient.generation && !cookieCheckPending && verifiedAccountGeneration !== generation) {
       sessionChecking = false;
       loggedIn = false;
-      send('status', snapshot());
+      notifyState();
     }
   } finally { if (pollSequence === cycle) polling = false; }
 }
@@ -1336,7 +1342,7 @@ function setFarming(on) {
   syncKeepAwake();
   reconcileWatchers();
   updateTray();
-  send('status', snapshot());
+  notifyState();
 }
 
 function recoverAfterResume() {
@@ -1480,7 +1486,7 @@ handleIpc('channel:show', (_e, slug) => {
   win.show(); win.focus();
   const s = status.get(slug);
   if (s) s.ageGate = false;
-  send('status', snapshot());
+  notifyState();
 });
 handleIpc('chat:send', (_e, { chatroomId, content }) => sendChat(chatroomId, content));
 
@@ -1499,7 +1505,6 @@ function start(mainWindow) {
   connectChat();
   apiReady.then(poll);
   intervals.push(setInterval(poll, POLL_MS));
-  intervals.push(setInterval(() => send('status', snapshot()), 15 * 1000));
   intervals.push(setInterval(() => { checkBonusEnding(); updateTray(); }, 30 * 1000));
   setTimeout(syncPartners, 30 * 1000);
   intervals.push(setInterval(syncPartners, 6 * 60 * 60 * 1000));
@@ -1517,7 +1522,7 @@ function stop() {
   if (awakeBlocker != null) { powerSaveBlocker.stop(awakeBlocker); awakeBlocker = null; }
 }
 const runtime = {
-  id, partition, start, stop, poll, snapshot, recoverAfterResume,
+  id, partition, start, stop, poll, snapshot, summary, recoverAfterResume,
   getIpcContext: () => ({ channels: config.channels, chatroomIds: [], viewport: mainWin?.getContentSize() || [1380, 840] }),
   invoke(command, event, args) {
     const handler = commands.get(command);
