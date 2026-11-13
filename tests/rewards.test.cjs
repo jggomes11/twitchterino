@@ -28,7 +28,7 @@ async function fixture(shop = rewards) {
   dbg.sendCommand = async method => method === 'Network.getResponseBody'
     ? { body: JSON.stringify({ data: { redeemCustomReward: { redemption: { id: 'redemption' } } } }) } : {};
   app.apiExports.watchRedemptions(slug, { debugger: dbg, isDestroyed: () => false });
-  return { app, async spend() { points -= 5000; await app.apiExports.poll(); },
+  return { app, async spend(amount = 5000) { points -= amount; await app.apiExports.poll(); },
     request(input) { dbg.emit('message', {}, 'Network.requestWillBeSent', { requestId: 'redeem', request: {
       url: 'https://gql.twitch.tv/gql', postData: JSON.stringify({ operationName: 'RedeemCustomReward', variables: { input } }),
     } }); },
@@ -70,3 +70,24 @@ test('a balance drop still detects a uniquely priced external Capture purchase',
   assert.equal(f.app.apiExports.config.purchases[0].kind, 'capture');
   assert.equal(f.app.apiExports.config.purchases[0].hours, 10);
 });
+
+for (const [title, kind, hours] of [
+  ['XP Boost', 'xp', 1],
+  ['Capture XP Boost', 'capture', 1],
+  ['XP Boost (3 h)', 'xp', 3],
+  ['+15% Capture XP Boost (10 h)', 'capture', 10],
+]) {
+  test(`the official shop redemption of ${title} starts the correct bonus counter`, async () => {
+    const f = await fixture([{id:'actual-boost',title,cost:5000,isEnabled:true}]);
+    f.request({rewardID:'actual-boost',cost:5000});
+    await f.finish();
+    const state = f.app.apiExports.snapshot();
+    assert.equal(state.purchases.length,1,'a successful shop redemption must enter history');
+    assert.equal(state.purchases[0].kind,kind);
+    assert.equal(state.purchases[0].hours,hours);
+    const bonus = state.bonuses.find(b=>b.kind===kind);
+    assert.ok(bonus.endsAt > Date.now()+hours*3600000-5000,'the purchased duration is added to its own counter');
+    await f.spend();
+    assert.equal(f.app.apiExports.config.purchases.length,1,'the subsequent balance drop must not add the boost twice');
+  });
+}

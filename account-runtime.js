@@ -254,13 +254,15 @@ const KINDS = [
   { kind: 'lure', name: '+15% Secret Lure', re: /secret\s*lure|\blure\b/i, def: 1000 },
 ];
 const KIND = Object.fromEntries(KINDS.map((k) => [k.kind, k]));
+// Specific boosts must win over the generic XP word in "Capture XP Boost".
+const REWARD_KINDS = [KIND.capture, KIND.lure, KIND.xp];
 
 function parseRewards(list) {
   const out = [];
   for (const r of list || []) {
     const title = String(r.title || '');
-    if (!/15\s*%|pokeidle|b[oô]nus/i.test(title)) continue;
-    const k = KINDS.find((x) => x.re.test(title));
+    if (!/15\s*%|pokeidle|b[oô]nus|\b(?:capture\s+(?:xp\s+)?|xp\s+)boost\b/i.test(title)) continue;
+    const k = REWARD_KINDS.find((x) => x.re.test(title));
     if (!k) continue;
     const hours = Number((title.match(/\((\d+)\s*h\)/i) || [0, 1])[1]) || 1;
     out.push({ id: r.id, kind: k.kind, hours, cost: r.cost, title, available: !!r.isEnabled && !r.isPaused && r.isInStock !== false });
@@ -1093,12 +1095,13 @@ function goalRank(s) {
 
 const compareGoal = (a, b) => {
   const ra = goalRank(a), rb = goalRank(b);
-  return !!a.cooling - !!b.cooling || !!b.sub - !!a.sub || !a.bonus - !b.bonus || ra.tier - rb.tier || ra.left - rb.left;
+  return !!b.sub - !!a.sub || !!a.cooling - !!b.cooling || !a.bonus - !b.bonus || ra.tier - rb.tier || ra.left - rb.left;
 };
 
 function worthSwitching(candidate, current) {
-  if (candidate.cooling || current.sub) return false;
+  if (current.sub) return false;
   if (candidate.sub) return true;
+  if (candidate.cooling) return false;
   if (candidate.bonus !== current.bonus) return candidate.bonus;
   const c = goalRank(candidate), w = goalRank(current);
   return c.tier < w.tier || (c.tier === w.tier && c.left + SWITCH_MARGIN < w.left);
@@ -1125,8 +1128,8 @@ function reconcileWatchers() {
 
   for (const slug of [...watchers.keys()]) {
     if (isShown(slug)) continue;
-    const idle = !config.watchAll && loggedIn && !limitTest && config.maxWatchers <= 2 && earningState(slug, now) === 'idle';
     const s = status.get(slug);
+    const idle = !s?.subscribed && !config.watchAll && loggedIn && !limitTest && config.maxWatchers <= 2 && earningState(slug, now) === 'idle';
     if (idle && s) s.cooldownUntil = now + IDLE_COOLDOWN_MS;
     if (idle || turnTime(slug, now) >= RECYCLE_MS) stopWatcher(slug);
   }
@@ -1136,20 +1139,20 @@ function reconcileWatchers() {
 
   const focusInfo = (slug) => {
     const s = status.get(slug) || {};
-    const cooling = (s.cooldownUntil || 0) > now;
-    return { points: s.points, rewards: s.rewards, cooling, sub: !!s.subscribed && !cooling, bonus: hasBonus(s) };
+    const cooling = !s.subscribed && (s.cooldownUntil || 0) > now;
+    return { points: s.points, rewards: s.rewards, cooling, sub: !!s.subscribed, bonus: hasBonus(s) };
   };
   const byGoal = (a, b) => compareGoal(focusInfo(a), focusInfo(b));
-  const waiting = config.channels.filter((slug) => !watchers.has(slug) && (status.get(slug) || {}).live && (config.watchAll || (status.get(slug) || {}).pointsEnabled !== false));
+  const waiting = config.channels.filter((slug) => !watchers.has(slug) && (status.get(slug) || {}).live && (config.watchAll || (status.get(slug) || {}).subscribed || (status.get(slug) || {}).pointsEnabled !== false));
   if (config.watchAll) {
     for (const slug of waiting) startWatcher(slug);
     return;
   }
-  if (config.rotation) waiting.sort(byGoal);
+  waiting.sort((a,b) => Number(focusInfo(b).sub)-Number(focusInfo(a).sub) || (config.rotation ? byGoal(a,b) : 0));
   while (watchers.size < config.maxWatchers && waiting.length) startWatcher(waiting.shift());
-  if (!config.rotation) return;
 
   for (const slug of rotatable().sort((a, b) => byGoal(b, a))) {
+    if (!config.rotation && (!waiting.length || !focusInfo(waiting[0]).sub)) break;
     if (!waiting.length || !worthSwitching(focusInfo(waiting[0]), focusInfo(slug))) break;
     stopWatcher(slug);
     startWatcher(waiting.shift());
