@@ -229,8 +229,10 @@ function createApiWindow() {
   win.webContents.on('render-process-gone',()=>releaseLoginWindow(win));
   win.on('closed',()=>{
     if(apiWin===win){apiWin=null;apiReady=null;}
+    notifyState();
     if(!disposed && !sessionTransition)void poll();
   });
+  notifyState();
   return win;
 }
 function loadApi(url,win=apiWin) {
@@ -1527,6 +1529,12 @@ function stop() {
 }
 const runtime = {
   id, partition, start, stop, poll, snapshot, summary, recoverAfterResume,
+  resources:()=>[
+    {role:'login',accountId:id,window:apiWin,manual:true},
+    ...[...watchers.values()].map(window=>({role:'player',accountId:id,window,manual:userOpened.has(window)})),
+    ...[...storeWindows.values()].map(window=>({role:'store',accountId:id,window,manual:true})),
+    ...[...chestWindows].map(window=>({role:'chest',accountId:id,window,manual:false})),
+  ],
   getIpcContext: () => ({ channels: config.channels, chatroomIds: [], viewport: mainWin?.getContentSize() || [1380, 840] }),
   invoke(command, event, args) {
     const handler = commands.get(command);

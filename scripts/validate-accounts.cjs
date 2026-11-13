@@ -36,7 +36,7 @@ function launch(port) {
   let child;
   try {
     child = spawn(executable, ['--remote-debugging-address=127.0.0.1', '--remote-debugging-port=' + port], {
-      env: { ...process.env, TWITCHTERINO_DATA: profile, ELECTRON_NO_ATTACH_CONSOLE: '1' },
+      env: { ...process.env, TWITCHTERINO_DATA: profile, TWITCHTERINO_DIAGNOSTICS:'1', ELECTRON_NO_ATTACH_CONSOLE: '1' },
       stdio: ['ignore', log, log],
     });
   } finally { fs.closeSync(log); }
@@ -133,6 +133,12 @@ async function markers(api) {
     assert.deepEqual(current.ui.exceptions, []);
     await quitApplication(current);
     report.checks.push('natural quit and reopen retain all four partition cookies and slot settings');
+    const diagnostics=fs.readFileSync(path.join(profile,'resources-log.jsonl'),'utf8');
+    const resources=diagnostics.trim().split('\n').map(line=>JSON.parse(line));
+    assert(resources.some(record=>record.resources.some(resource=>resource.role==='main')));
+    assert(resources.some(record=>record.resources.some(resource=>resource.role==='login')));
+    assert(!/FAKE_ACCOUNT_|profile-isolation\.invalid|"token"|"cookies"|webSocketDebuggerUrl/.test(diagnostics));
+    report.checks.push('opt-in resource inventory identifies main/login renderers without cookies or URLs');
     report.passed = true;
   } catch (error) {
     report.error = error.message; process.exitCode = 1;

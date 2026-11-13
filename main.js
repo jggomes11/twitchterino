@@ -9,6 +9,7 @@ const { createAccountRuntime } = require('./account-runtime');
 const { createAccountManager, ACCOUNT_IDS } = require('./account-manager');
 const { createIpcRegistrar } = require('./security/ipc');
 const { createPartnersClient } = require('./security/partners');
+const { createResourceRecorder } = require('./security/diagnostics');
 const publicPartners=createPartnersClient({platform:'twitch',fetch:(url,options)=>net.fetch(url,options)});
 const UI_DOCUMENT = pathToFileURL(path.join(__dirname, 'renderer', 'index.html')).href;
 // Mantém vídeos rodando mesmo com janelas ocultas/minimizadas.
@@ -35,6 +36,10 @@ let broadcastPending = false;
 let statusInterval = null;
 let trayMenuSignature = null;
 let trayTooltip = null;
+let resourceRecorder = null;
+function recordResources() {
+  if(resourceRecorder)resourceRecorder.record([{role:'main',window:mainWin,manual:true},...runtimes.flatMap(r=>r.resources())]);
+}
 const isLinux = process.platform === 'linux';
 const loginProfilePath = process.platform === 'win32' && customDataPath ? path.resolve(app.getPath('userData')) : null;
 const LOGIN_ITEM = {
@@ -74,7 +79,9 @@ function broadcast() {
   broadcastPending=true;
   queueMicrotask(()=>{
     broadcastPending=false;
-    if (!app.isQuitting && mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('status',manager.snapshot());
+    if (!app.isQuitting && mainWin && !mainWin.isDestroyed()) {
+      mainWin.webContents.send('status',manager.snapshot());recordResources();
+    }
   });
 }
 function updateTray() {
@@ -148,11 +155,13 @@ else {
     });
     mainWin.setMenuBarVisibility(false);
     mainWin.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+    mainWin.webContents.on('did-finish-load',recordResources);
     mainWin.on('close', event => { if (!app.isQuitting) { event.preventDefault(); mainWin.hide(); } });
     mainWin.on('query-session-end', () => { app.isQuitting = true; });
     mainWin.on('session-end', () => { app.isQuitting = true; });
     tray = new Tray(nativeImage.createFromPath(path.join(__dirname, 'build', 'icon.png')).resize({ width: 16, height: 16 }));
     tray.on('click', () => showMain());
+    if(process.env.TWITCHTERINO_DIAGNOSTICS==='1')resourceRecorder=createResourceRecorder({fs,directory:app.getPath('userData'),rootProcessId:process.pid,version:app.getVersion()});
     for (const runtime of runtimes) runtime.start(mainWin);
     statusInterval=setInterval(broadcast,15*1000);
     powerMonitor.on('resume', () => runtimes.forEach(r => r.recoverAfterResume()));
