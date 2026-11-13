@@ -260,3 +260,16 @@ fn selected_reward_price_is_not_the_next_balance_goal() {
         800
     );
 }
+#[test]
+fn smoke_uses_rust_temp_base_and_only_a_shared_numeric_run_id() {
+    use std::path::Path;
+    use terino_prototype::model::smoke_directory;
+    let base = Path::new("test-temp");
+    assert_eq!(
+        smoke_directory(base, "43246393485").unwrap(),
+        base.join("terino-smoke-43246393485")
+    );
+    for id in ["", "../profile", "C:\\Users\\profile", "a/b", "one"] {
+        assert!(smoke_directory(base, id).is_err());
+    }
+}

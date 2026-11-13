@@ -1207,18 +1207,9 @@ pub fn run() {
         })
         .setup(|app| {
             let root = if std::env::args().any(|a| a == "--smoke-test") {
-                {
-                    let path = std::env::var_os("TERINO_SMOKE_PROFILE")
-                        .map(PathBuf::from)
-                        .unwrap_or_else(|| {
-                            std::env::temp_dir()
-                                .join(format!("terino-prototype-smoke-{}", std::process::id()))
-                        });
-                    if !path.starts_with(std::env::temp_dir()) {
-                        return Err("O perfil de smoke deve ficar no diretório temporário".into());
-                    }
-                    path
-                }
+                let run_id = std::env::var("TERINO_SMOKE_ID")
+                    .unwrap_or_else(|_| std::process::id().to_string());
+                model::smoke_directory(&std::env::temp_dir(), &run_id)?
             } else {
                 app.path().app_data_dir()?
             };

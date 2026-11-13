@@ -444,3 +444,10 @@ impl Selection {
         self.revision = 0;
     }
 }
+
+pub fn smoke_directory(base: &std::path::Path, run_id: &str) -> Result<std::path::PathBuf, String> {
+    if run_id.is_empty() || run_id.len() > 30 || !run_id.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("Identificador do teste inválido".into());
+    }
+    Ok(base.join(format!("terino-smoke-{run_id}")))
+}

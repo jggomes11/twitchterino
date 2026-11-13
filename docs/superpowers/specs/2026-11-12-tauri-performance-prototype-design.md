@@ -73,6 +73,10 @@ Executáveis do protótipo usam nome, identificador, diretório de dados e mutex
 
 Entregar builds Windows identificados como protótipo, commits e dependências registrados, instruções curtas de execução/remoção e arquivos de medição sem segredos. Não criar release estável, substituir binários publicados ou habilitar atualização automática nesta etapa.
 
+## PC de referência informado pelo usuário
+
+Windows 11, Ryzen 9 5900X, 32 GB de RAM a 3200 MHz e RTX 5060 Ti. Edição/build do Windows, versão do driver e condições de energia serão registrados no ensaio. A configuração não é um resultado de benchmark nem permite prever economia de RAM.
+
 ## Comparação de desempenho
 
 Referências: Twitchterino v0.1.5, fonte `a0942c6bb25a6a142fdab5a09c4b199a5b698e00`; Kickterino v0.3.1, fonte `90aaf8176ada0aef4f8cbe244e48fea764538643`. Conferir integridade pelos manifests publicados. As branches main consultadas na base técnica não contêm todas as alterações das releases.
