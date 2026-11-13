@@ -10,6 +10,7 @@ const { createPlatformClient } = require('./security/platform');
 const { readCookie } = require('./security/requests');
 const { selectReportAccount } = require('./security/accounts');
 const { chestClickScript } = require('./security/chest');
+const { createTimers } = require('./security/timers');
 const { pathToFileURL } = require('node:url');
 const UI_DOCUMENT = pathToFileURL(path.join(__dirname, 'renderer', 'index.html')).href;
 
@@ -19,6 +20,9 @@ const commands = new Map();
 const handleIpc = (channel, handler) => commands.set(channel, handler);
 const PARTITION = partition;
 const apiClient = createPlatformClient('twitch', () => session.fromPartition(PARTITION));
+const timers=createTimers({setTimeout,clearTimeout,setInterval,clearInterval});
+const later=timers.after;
+const withTimeout=timers.withTimeout;
 let sessionTransition = false;
 let verifiedAccountGeneration = -1;
 let verifiedTokenDigest = null;
@@ -105,8 +109,8 @@ let apiReady = null;
 const watchers = new Map(); // slug -> BrowserWindow
 const status = new Map();   // slug -> estado do canal
 
-function send(channel, payload) { emit(id, channel, payload); }
-function notifyState() { emit(id, 'status'); }
+function send(channel, payload) { if(!disposed)emit(id, channel, payload); }
+function notifyState() { if(!disposed)emit(id, 'status'); }
 
 // Anúncios e rastreadores de terceiros: não fazem parte da live e só gastam memória/CPU.
 const BLOCKED_HOSTS = [
@@ -140,7 +144,7 @@ function setupSession() {
   ses.cookies.on('changed', (_e, changedCookie) => {
     if (sessionTransition) return;
     if (changedCookie.name !== 'auth-token' || !['twitch.tv', 'www.twitch.tv'].includes(changedCookie.domain.replace(/^\./, ''))) return;
-    clearTimeout(authRefreshTimer);
+    timers.cancel(authRefreshTimer);
     authRefreshTimer = null;
     apiClient.invalidate();
     verifiedAccountGeneration = -1;
@@ -149,7 +153,7 @@ function setupSession() {
     cookieCheckPending = true;
     if (ircSend) { const socket = ircSend; ircSend = null; try { socket.close(); } catch {} }
     const generation = apiClient.generation;
-    authRefreshTimer = setTimeout(async () => {
+    authRefreshTimer = later(async () => {
       authRefreshTimer = null;
       try {
         const token = await authToken();
@@ -207,9 +211,6 @@ function lowestQualityOnly(playlist) {
 // Página "vazia" em twitch.tv: mesma origem e cookies, sem carregar o site inteiro.
 const LIGHT_URL = `${TWITCH}/robots.txt`;
 
-const withTimeout = (promise, ms) => Promise.race([
-  promise, new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms)),
-]);
 
 function loadApi(url) {
   apiReady = new Promise((resolve) => apiWin.webContents.once('did-finish-load', resolve));
@@ -224,7 +225,7 @@ function createApiWindow() {
     webPreferences: { partition: PARTITION, backgroundThrottling: false },
   });
   apiWin.webContents.setAudioMuted(true);
-  const retryApi = () => setTimeout(() => { if (!apiWin.isVisible()) loadApi(LIGHT_URL); }, 30 * 1000);
+  const retryApi = () => later(() => { if (!apiWin.isVisible()) loadApi(LIGHT_URL); }, 30 * 1000);
   apiWin.webContents.on('did-fail-load', (_e, code, _desc, _url, isMainFrame) => { if (isMainFrame && code !== -3) retryApi(); });
   apiWin.webContents.on('render-process-gone', retryApi);
   loadApi(LIGHT_URL);
@@ -652,7 +653,7 @@ function assertChestOwner(owner) {
 async function waitForChestOwner(owner) {
   // Give the selected-cookie read the same bounded budget as an API request.
   // No account work is accepted while verification is pending.
-  for (let elapsed = 0; elapsed < 20000 && sessionChecking && !sessionTransition; elapsed += 25) await new Promise(resolve => setTimeout(resolve, 25));
+  for (let elapsed = 0; elapsed < 20000 && sessionChecking && !sessionTransition; elapsed += 25) await timers.sleep(25);
   assertChestOwner(owner);
 }
 
@@ -711,7 +712,7 @@ async function confirmChestClaim(slug, claim, before, owner) {
     const noLongerAvailable = points && Object.prototype.hasOwnProperty.call(points, 'availableClaim')
       && (points.availableClaim === null || (typeof points.availableClaim?.id === 'string' && points.availableClaim.id !== claim));
     if (noLongerAvailable && typeof points.balance === 'number' && points.balance >= before + 50) return points.balance;
-    if (attempt < 4) await new Promise(resolve => setTimeout(resolve, 750));
+    if (attempt < 4) await timers.sleep(750);
   }
   throw new Error('Claim not confirmed');
 }
@@ -830,19 +831,20 @@ function handleIrc(raw) {
 }
 
 function connectChat() {
-  if (disposed) return;
+  if (disposed || (irc && irc.readyState <= 1)) return;
   if (typeof WebSocket === 'undefined') return;
   const ws = new WebSocket('wss://irc-ws.chat.twitch.tv:443');
   irc = ws;
   ws.onopen = () => {
+    if(disposed || irc!==ws){try{ws.close();}catch{}return;}
     ws.send('CAP REQ :twitch.tv/tags twitch.tv/commands');
     ws.send('PASS SCHMOOPIIE');
     ws.send(`NICK justinfan${Math.floor(10000 + Math.random() * 80000)}`);
     ircJoined.clear();
     syncChat();
   };
-  ws.onmessage = (e) => String(e.data).split('\r\n').forEach(handleIrc);
-  ws.onclose = () => { if (irc === ws) irc = null; setTimeout(connectChat, 10 * 1000); };
+  ws.onmessage = (e) => {if(!disposed&&irc===ws)String(e.data).split('\r\n').forEach(handleIrc);};
+  ws.onclose = () => { if (irc === ws) irc = null; later(connectChat, 10 * 1000); };
   ws.onerror = () => {};
 }
 
@@ -867,7 +869,7 @@ async function sendChat(slug, content) {
     ws.login = login;
     ws.generation = generation;
     ircSend = ws;
-    ws.ready = new Promise((resolve, reject) => {
+    ws.ready = withTimeout(new Promise((resolve, reject) => {
       ws.onopen = () => {
         if (generation !== apiClient.generation || sessionTransition || ircSend !== ws) { try { ws.close(); } catch {} reject(new Error('Session changed')); return; }
         ws.send(`PASS oauth:${token}`); ws.send(`NICK ${login}`);
@@ -880,8 +882,7 @@ async function sendChat(slug, content) {
         }
       };
       ws.onclose = () => reject(new Error('chat fechou'));
-      setTimeout(() => reject(new Error('timeout')), 10 * 1000);
-    });
+    }), 10 * 1000);
   }
   const socket = ircSend;
   try {
@@ -1279,7 +1280,7 @@ let pollSequence = 0;
 let loggedIn = false;
 const step = (...a) => { if (process.env.TWITCHTERINO_DEBUG) console.log('STEP', new Date().toISOString().slice(11, 19), ...a); };
 async function poll() {
-  if (sessionTransition || cookieCheckPending) return;
+  if (disposed || sessionTransition || cookieCheckPending) return;
   const generation = apiClient.generation;
   if (polling && pollingGeneration === generation && Date.now() - pollStartedAt < POLL_STUCK_MS) return;
   const startedAt = Date.now();
@@ -1348,7 +1349,7 @@ function setFarming(on) {
 function recoverAfterResume() {
   for (const slug of [...watchers.keys()]) if (!isShown(slug)) stopWatcher(slug);
   if (!apiWin.isVisible()) loadApi(LIGHT_URL);
-  setTimeout(poll, 15 * 1000);
+  later(poll, 15 * 1000);
 }
 
 handleIpc('state:get', () => snapshot());
@@ -1446,7 +1447,7 @@ handleIpc('logout', async () => {
   });
   if (response !== 0) return snapshot();
   sessionTransition = true;
-  clearTimeout(authRefreshTimer);
+  timers.cancel(authRefreshTimer);
   authRefreshTimer = null;
   verifiedTokenDigest = null;
   sessionChecking = false;
@@ -1470,7 +1471,7 @@ handleIpc('logout', async () => {
     sessionTransition = false;
     apiClient.resume();
   }
-  setTimeout(poll, 0);
+  later(poll, 0);
   return snapshot();
 });
 handleIpc('store:open', (_e, slug) => openStore(slug));
@@ -1493,7 +1494,6 @@ handleIpc('chat:send', (_e, { chatroomId, content }) => sendChat(chatroomId, con
 
 let started = false;
 let disposed = false;
-const intervals = [];
 function start(mainWindow) {
   if (started) return;
   started = true;
@@ -1504,16 +1504,16 @@ function start(mainWindow) {
   createApiWindow();
   connectChat();
   apiReady.then(poll);
-  intervals.push(setInterval(poll, POLL_MS));
-  intervals.push(setInterval(() => { checkBonusEnding(); updateTray(); }, 30 * 1000));
-  setTimeout(syncPartners, 30 * 1000);
-  intervals.push(setInterval(syncPartners, 6 * 60 * 60 * 1000));
+  timers.every(poll, POLL_MS);
+  timers.every(() => { checkBonusEnding(); updateTray(); }, 30 * 1000);
+  later(syncPartners, 30 * 1000);
+  timers.every(syncPartners, 6 * 60 * 60 * 1000);
 }
 function stop() {
   disposed = true;
   sessionTransition = true;
-  clearTimeout(authRefreshTimer);
-  intervals.forEach(clearInterval);
+  timers.cancel(authRefreshTimer);
+  timers.stop();
   apiClient.suspend();
   resetAccountRuntime();
   if (irc) { try { irc.close(); } catch {} }
