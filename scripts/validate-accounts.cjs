@@ -52,16 +52,19 @@ async function open(child) {
   const ui = await connect(target.webSocketDebuggerUrl); connections.add(ui); await ui.call('Runtime.enable');
   await until(async () => {
     const state = await evaluate(ui, 'window.tt && window.tt.getState()');
-    return state?.accounts?.length === 4 && await evaluate(ui, 'document.querySelectorAll("#accounts button").length === 4');
+    return state?.accounts?.length === 4 && await evaluate(ui, 'document.querySelectorAll("#accounts .account-card > .account-tab").length === 4');
   }, 'Four account controls');
   return {child, ui, targets};
 }
 async function select(client, index) {
   const id = 'account-' + index;
-  await evaluate(client.ui, `document.querySelector('[data-account-id="${id}"]').click()`);
+  // Exercise the slot selection handler without activating the separate Add account action.
+  await evaluate(client.ui, `selectAccount(${JSON.stringify(id)})`);
   return until(async () => {
     const state = await evaluate(client.ui, 'window.tt.getState()');
-    assertAccountReady(state, id); return state;
+    assertAccountReady(state, id);
+    assert.equal(await evaluate(client.ui, 'document.querySelector("#accounts .account-card.active").dataset.accountId'), id);
+    return state;
   }, 'Account ' + index + ' metadata/defaults', 65000);
 }
 async function openSession(client, boundIds = new Set()) {

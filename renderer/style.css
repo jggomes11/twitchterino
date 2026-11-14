@@ -83,7 +83,6 @@ main { flex: 1; display: flex; min-height: 0; }
 #btn-points.bump { animation: bump .6s ease; }
 @keyframes bump { 40% { transform: scale(1.12); } }
 #memory { color: var(--muted); font-variant-numeric: tabular-nums; }
-#btn-login.ok { border-color: var(--kick); color: var(--kick); }
 #input { flex: 1; min-width: 0; background: var(--bg-2); border: 1px solid var(--border); border-radius: 3px; padding: 6px 8px; }
 #input:focus { outline: none; border-color: var(--kick); }
 

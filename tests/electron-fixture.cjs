@@ -3,12 +3,17 @@
 const { app, session } = require('electron');
 const assert = require('node:assert/strict');
 const http = require('node:http');
+const fs = require('node:fs');
+const { checkpoint } = require('./electron-fixture-support.cjs');
 const { createSessionClient, readCookie } = require('../security/requests');
 
 app.setPath('userData', process.env.SECURITY_FIXTURE_DATA);
+app.on('window-all-closed', () => {});
+checkpoint('waiting for Electron ready');
 app.whenReady().then(async () => {
   let server;
   try {
+    checkpoint('Chromium session transport');
     let leaked = 0;
     let observed;
     server = http.createServer((req, res) => {
@@ -99,6 +104,10 @@ app.whenReady().then(async () => {
     await ses.clearStorageData();
     console.log('Electron transport fixture: session cookies, fixed destination, redirect refusal, timeout and invalidation passed.');
     server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
+    checkpoint('account controls');
+    await require('./account-controls-electron.cjs')();
+    checkpoint('all checks passed');
+    fs.writeFileSync(process.env.SECURITY_FIXTURE_RESULT, JSON.stringify({passed: true}));
     app.exit(0);
   } catch (error) {
     console.error(error.message);

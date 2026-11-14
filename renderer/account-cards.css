@@ -1,0 +1,15 @@
+#accounts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; padding: 10px 14px 4px; flex-shrink: 0; }
+.account-card { position: relative; display: flex; align-items: center; min-width: 0; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-2); }
+.account-card.active { border-color: var(--kick); background: color-mix(in srgb, var(--kick) 12%, var(--bg)); box-shadow: inset 0 -2px var(--kick); }
+.account-card .account-tab { display: flex; flex: 1; flex-direction: column; gap: 3px; align-self: stretch; min-width: 0; min-height: 54px; padding: 9px 12px; text-align: left; border: 0; border-radius: 9px; background: transparent; box-shadow: none; }
+.account-card .account-tab b, .account-card .account-tab small { display: block; width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.account-card .account-tab b { color: var(--text); font-size: 12px; }
+.account-card .account-tab small { color: var(--muted); font-size: 11px; }
+.account-card .account-settings { flex-shrink: 0; width: 30px; height: 30px; margin: 0 8px 0 0; padding: 0; border-radius: 8px; color: var(--muted); }
+.account-card .account-settings:hover, .account-card .account-settings[aria-expanded=true] { color: var(--text); border-color: var(--kick); }
+.account-menu { position: absolute; top: calc(100% + 6px); right: 0; z-index: 50; min-width: 160px; padding: 5px; border: 1px solid var(--border); border-radius: 10px; background: var(--solid, var(--bg)); box-shadow: 0 8px 24px rgba(0, 0, 0, .4); }
+.account-menu button { display: block; width: 100%; padding: 8px 10px; text-align: left; border-color: transparent; border-radius: 6px; background: transparent; color: #ff9f9f; }
+.account-menu button:hover, .account-menu button:focus-visible { background: rgba(255, 100, 100, .12); border-color: rgba(255, 100, 100, .3); box-shadow: none; }
+.account-card button:focus-visible { outline: 2px solid var(--kick); outline-offset: 2px; }
+.account-settings[hidden], .account-menu[hidden] { display: none; }
+@media (max-width: 700px) { #accounts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

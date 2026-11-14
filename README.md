@@ -18,7 +18,7 @@ The platform's own web pages still handle their normal website login and cookies
 
 ## Automatic playback
 
-Sign in once in the official Twitch window. Enable **Todas as lives online** in settings and turn on **Juntar pontos** to start the online channels from your list automatically; newly live channels are picked up by polling. Selecting a channel changes the chat. **Mostrar player** reveals an existing player without reloading it and is not required for background playback.
+Sign in once in the official Twitch window. Collection starts automatically whenever the app opens with a connected account. Enable **Todas as lives online** in settings to watch all online channels from your list; newly live channels are picked up by polling. Selecting a channel changes the chat. **Mostrar player** reveals an existing player without reloading it and is not required for background playback.
 
 Disable all-live mode to use **Limite de lives** and bonus prioritization. Age-confirmation prompts still require confirmation on the official page. Verify actual point awards by comparing each channel's balance.
 
@@ -55,7 +55,7 @@ Download **Twitchterino-Setup.exe**, run the installer, then open Twitchterino f
 
 Use only as many account slots as you need, up to four. One or two accounts are sufficient; the four slots are optional. Sign in to a different Twitch account in each slot you use, through its official login window. Each slot has independent cookies, channels, settings, players, chests and reports, and selecting another account leaves other collectors running. Unauthenticated slots do not start collection players. Memory/network consumption grows with active players.
 
-Fresh accounts use **Todas as lives online** off, **Limite de lives: 2**, **Foco em bônus**, **Juntar pontos** and **Pegar baú sozinho** on. Existing settings are preserved. Twitch decides whether points are credited. Use one active app per Twitch account when checking points, including older versions.
+Fresh accounts use **Todas as lives online** off, **Limite de lives: 2**, **Foco em bônus** and **Pegar baú sozinho** on. Collection starts automatically on launch, including profiles previously paused; other existing settings are preserved. Twitch decides whether points are credited. Use one active app per Twitch account when checking points, including older versions.
 
 The installer keeps the original application identity and default Electron user-data profile; slot1 retains that profile's existing login/configuration. Earlier RC/portable launchers used separate profiles and are not imported into the installed app. Users switching from the portable package may need to sign in again; keep the old profile until access is confirmed. Normal installer updates retain the installed profile. Quit through **Sair** in the tray before upgrading. Do not upload profile directories, cookies or tokens.
 

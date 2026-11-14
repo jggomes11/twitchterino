@@ -79,5 +79,5 @@ test('an online subscription takes an automatic slot even when goal rotation is 
   state.live.delete('beta');await runtime.poll();
   assert.deepEqual(watched(runtime),['alpha'],'offline subscription releases its automatic slot');
   await runtime.invoke('farming:set',app.event(),[false]);
-  assert.equal(watched(runtime).length,0,'the user can still pause collection');
+  assert.equal(watched(runtime).length,0,'the internal validation command can stop its players');
 });

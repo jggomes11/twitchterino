@@ -4,11 +4,12 @@ const uiArgument = process.argv.find((arg) => arg.startsWith('--app-ui-url='));
 if (process.isMainFrame && uiArgument && location.href === uiArgument.slice('--app-ui-url='.length)) {
   let selectedAccountId = 'account-1';
   let selectionInitialized = false;
-  const accountInvoke = async (command, ...args) => {
-    const accountId = selectedAccountId;
+  const invokeAccount = async (accountId, command, ...args) => {
+    if (!/^account-[1-4]$/.test(accountId)) throw new Error('Invalid account');
     const reply = await ipcRenderer.invoke('account:command', { accountId, command, args });
     return reply.result && typeof reply.result === 'object' ? { ...reply.result, accountId: reply.accountId } : reply.result;
   };
+  const accountInvoke = (command, ...args) => invokeAccount(selectedAccountId, command, ...args);
   const accountEvent = (channel, callback) => ipcRenderer.on(channel, (_event, message) => {
     if (message.accountId === selectedAccountId) callback(message.payload, message.accountId);
   });
@@ -48,6 +49,7 @@ if (process.isMainFrame && uiArgument && location.href === uiArgument.slice('--a
     openStore: (slug) => accountInvoke('store:open', slug),
     showLogin: () => accountInvoke('login:show'),
     logout: () => accountInvoke('logout'),
+    logoutAccount: (id) => invokeAccount(id, 'logout'),
     showChannel: (slug) => accountInvoke('channel:show', slug),
     sendChat: (chatroomId, content) => accountInvoke('chat:send', { chatroomId, content }),
     setNotifyChat: (on) => accountInvoke('notifyChat:set', on),

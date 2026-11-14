@@ -95,6 +95,8 @@ function loadConfig() {
   fs.mkdirSync(dataDirectory, { recursive: true });
   firstRun = !fs.existsSync(configPath());
   try { config = { ...freshDefaults(), ...JSON.parse(fs.readFileSync(configPath(), 'utf8')) }; } catch {}
+  // A coleta começa ao abrir o app, inclusive para perfis pausados em versões antigas.
+  config.farming = true;
   const seen = new Set(config.seenDefaults || config.channels);
   for (const slug of DEFAULT_CONFIG.channels) {
     if (!seen.has(slug) && !config.channels.includes(slug)) config.channels.push(slug);
