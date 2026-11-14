@@ -60,14 +60,6 @@ input:focus, select:focus { outline: none; border-color: var(--violet); box-shad
 .brand { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 10px; background: var(--grad); color: #fff; font-weight: 900; font-size: 16px; padding: 0; box-shadow: var(--glow); }
 .brand-name { margin: 0; font-size: 16px; font-weight: 800; letter-spacing: .01em; background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
 
-/* Interruptor grande "Juntar pontos" */
-.switch { display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; padding: 4px 12px 4px 6px; border-radius: 999px; background: rgba(20, 14, 40, .6); border: 1px solid var(--border); }
-.switch input { display: none; }
-.switch-ui { width: 38px; height: 22px; border-radius: 999px; background: #3a3156; position: relative; transition: background .2s; }
-.switch-ui::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform .2s cubic-bezier(.3, 1.5, .5, 1); }
-.switch input:checked + .switch-ui { background: var(--grad); box-shadow: var(--glow); }
-.switch input:checked + .switch-ui::after { transform: translateX(16px); }
-.switch-text { font-weight: 600; }
 .target { display: flex; align-items: center; gap: 4px; }
 
 #summary { display: flex; gap: 6px; margin-left: auto; background: none; border: 0; padding: 0; min-width: 0; overflow: hidden; }
@@ -78,9 +70,6 @@ input:focus, select:focus { outline: none; border-color: var(--violet); box-shad
 .stat.on b { color: var(--cyan); }
 .stat.up b { color: #7dffb3; }
 .stat.warn { border-color: rgba(255, 207, 74, .4); }
-#btn-login { font-weight: 700; }
-#btn-login:not(.ok) { background: var(--grad); border: 0; color: #fff; }
-#btn-login.ok { background: rgba(20, 14, 40, .6); border-color: rgba(62, 230, 255, .35); color: var(--cyan); }
 #btn-panel.wide { white-space: nowrap; }
 
 /* ---------- Configurações (gaveta) ---------- */
@@ -103,7 +92,7 @@ input:focus, select:focus { outline: none; border-color: var(--violet); box-shad
 
 /* ---------- Estrutura ---------- */
 #shell { flex: 1; display: flex; gap: 10px; padding: 10px; min-height: 0; }
-main { flex: 1; display: flex; gap: 10px; min-height: 0; min-width: 0; }
+main { position: relative; flex: 1; display: flex; gap: 10px; min-height: 0; min-width: 0; }
 #rail, #chat-col, #panel { background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius); backdrop-filter: blur(18px); box-shadow: 0 8px 30px rgba(0, 0, 0, .3); }
 
 /* ---------- Lista lateral ---------- */
@@ -248,13 +237,13 @@ button.group:hover { color: var(--text); background: none; box-shadow: none; }
 /* Telas estreitas: o painel de bônus vira sobreposição e a lista lateral encolhe */
 @media (max-width: 1180px) {
   #summary .stat small { display: none; }
-  #panel { position: fixed; right: 20px; top: 74px; bottom: 20px; z-index: 12; background: rgba(22, 15, 44, .97); }
+  #panel { position: absolute; right: 0; top: 0; bottom: 0; max-width: 100%; z-index: 12; background: rgba(22, 15, 44, .97); }
 }
 @media (max-width: 900px) {
   #rail { width: 76px; }
   .ch-info, .ch-side, .group, .search, .add-ch { display: none; }
   .ch { justify-content: center; }
-  .brand-name, .switch-text { display: none; }
+  .brand-name { display: none; }
 }
 .stat.gold b { color: var(--gold); }
 .chest-mini.claiming { animation: chest-spin 1s ease-in-out infinite; background: linear-gradient(135deg, #7dffb3, #3ee6ff); }

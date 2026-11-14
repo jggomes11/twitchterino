@@ -148,12 +148,13 @@ else {
   app.setAppUserModelId('com.vinniisaantos.twitchterino');
   app.whenReady().then(() => {
     mainWin = new BrowserWindow({
-      width: 1380, height: 900, minWidth: 820, minHeight: 620, backgroundColor: '#0b0716', title: 'Twitchterino',
+      width: 1380, height: 900, minWidth: 820, minHeight: 620, backgroundColor: '#0b0716', title: `Twitchterino v${app.getVersion()}`,
       show: !process.argv.includes('--hidden'), icon: path.join(__dirname, 'build', 'icon.png'),
       webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, sandbox: true,
         nodeIntegration: false, additionalArguments: ['--app-ui-url=' + UI_DOCUMENT] },
     });
     mainWin.setMenuBarVisibility(false);
+    mainWin.on('page-title-updated', event => event.preventDefault());
     mainWin.loadFile(path.join(__dirname, 'renderer', 'index.html'));
     mainWin.webContents.on('did-finish-load',recordResources);
     mainWin.on('close', event => { if (!app.isQuitting) { event.preventDefault(); mainWin.hide(); } });

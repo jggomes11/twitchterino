@@ -7,15 +7,13 @@
   <link rel="stylesheet" href="style.css">
   <link rel="stylesheet" href="features.css">
   <link rel="stylesheet" href="theme.css">
+  <link rel="stylesheet" href="account-cards.css">
 </head>
 <body>
   <div class="aurora" aria-hidden="true"><i></i><i></i><i></i></div>
 
   <header id="toolbar">
     <div class="logo"><span class="brand">T</span><span class="brand-name">Twitchterino</span></div>
-    <label class="switch" title="Liga ou pausa as lives ocultas que juntam pontos">
-      <input type="checkbox" id="farming"><span class="switch-ui"></span><span class="switch-text">Juntar pontos</span>
-    </label>
     <label class="target" title="Qual bônus o foco deve buscar. O preço é lido da loja de cada canal.">🎯 <select id="bonus-target">
       <option value="">Bônus automático</option>
       <option value="xp">+15% XP</option>
@@ -23,7 +21,6 @@
       <option value="lure">+15% Secret Lure</option>
     </select></label>
     <div id="summary"></div>
-    <button id="btn-login" title="Abre a Twitch para você fazer login (uma vez só)">Entrar com a Twitch</button>
     <button id="btn-settings" class="icon" title="Configurações">⚙</button>
     <button id="btn-panel" class="icon wide" title="Painel de pontos e bônus">Bônus ▸</button>
   </header>
@@ -33,7 +30,7 @@
 
   <div id="settings" hidden>
     <h3>Configurações</h3>
-    <label class="toggle"><input type="checkbox" id="watch-all"> <span><b>Todas as lives online</b><small>Com Juntar pontos ligado, inicia os canais da lista e os que entrarem ao vivo. Não precisa abrir cada player.</small></span></label>
+    <label class="toggle"><input type="checkbox" id="watch-all"> <span><b>Todas as lives online</b><small>Inicia automaticamente os canais da lista e os que entrarem ao vivo. Não precisa abrir cada player.</small></span></label>
     <label class="toggle"><input type="checkbox" id="rotation"> <span><b>Foco em bônus</b><small>As vagas vão para os canais mais perto do próximo bônus. Subs vêm primeiro.</small></span></label>
     <label class="row" title="Usado quando Todas as lives online estiver desligado.">
       <span><b>Limite de lives</b><small>Usado quando Todas as lives online estiver desligado.</small></span><input type="number" id="max-watchers" min="1" max="10"></label>
@@ -47,7 +44,6 @@
     <label class="toggle"><input type="checkbox" id="sleep-mode"> <span><b>Modo antes de dormir</b><small>Botão que abre as lojas uma de cada vez. Desligado por padrão.</small></span></label>
     <div class="settings-foot">
       <button id="btn-refresh">↻ Atualizar agora</button>
-      <button id="btn-logout" hidden>Sair da conta</button>
       <button id="btn-quit" hidden>Fechar o app</button>
       <span id="memory" title="Memória total usada pelo Twitchterino"></span>
     </div>
@@ -65,7 +61,7 @@
           <span id="chat-title"></span>
           <span id="chat-actions">
             <button id="btn-fav" class="icon" title="Fixar: o canal fica no topo da lista e você recebe um aviso quando ele entrar ao vivo">☆</button>
-            <button id="btn-show" title="Mostra o player com som. Juntar pontos inicia a coleta automaticamente em segundo plano.">▶ Mostrar player</button>
+            <button id="btn-show" title="Mostra o player com som. A coleta já acontece automaticamente em segundo plano.">▶ Mostrar player</button>
             <button id="btn-remove" class="icon" title="Remover canal">✕</button>
           </span>
         </div>
@@ -97,7 +93,7 @@
         <div id="tools">
           <button id="btn-report" title="Pontos, bônus comprados e tempo com bônus ativo nos últimos 7 dias">📊 Relatório da semana</button>
         </div>
-        <p class="hint">A Twitch dá 10 pontos a cada 5 min por live assistida (sub ganha mais: ×1,2 no nível 1, ×1,4 no 2 e ×2 no 3). O baú de bônus vale +50 quando você clica nele. O preço dos bônus é lido da loja de cada canal. Cada conta mantém seus próprios canais, pontos e bônus. Selecionar um canal muda o chat; Juntar pontos inicia os players automaticamente. Confira o ganho pelo saldo de cada canal.</p>
+        <p class="hint">A Twitch dá 10 pontos a cada 5 min por live assistida (sub ganha mais: ×1,2 no nível 1, ×1,4 no 2 e ×2 no 3). O baú de bônus vale +50 quando você clica nele. O preço dos bônus é lido da loja de cada canal. Cada conta mantém seus próprios canais, pontos e bônus. Selecionar um canal muda o chat; a coleta inicia os players automaticamente. Confira o ganho pelo saldo de cada canal.</p>
       </aside>
     </main>
   </div>
@@ -107,6 +103,7 @@
   <canvas id="confetti"></canvas>
 
   <script src="../security/account-view.js"></script>
+  <script src="account-cards.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

@@ -13,6 +13,16 @@ let state = { channels: [], farming: true, maxWatchers: 2 };
 let active = null;
 const buffers = new Map();
 const unread = new Set();
+const accountCards = AccountCards.create({
+  container: $('#accounts'),
+  onSelect: selectAccount,
+  onConnect: async id => { if (await selectAccount(id)) await api.showLogin(); },
+  onDisconnect: async id => {
+    await window.tt.logoutAccount(id);
+    applyState(await api.getState());
+  },
+  onError: () => toast('Não foi possível alterar esta conta. Tente novamente.'),
+});
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -132,7 +142,6 @@ function chestButton(ch) {
 
 function pendingPlaybackLabel() {
   if (state.sessionChecking) return 'VERIFICANDO SESSÃO';
-  if (!state.farming) return 'PAUSADO';
   if (!state.loggedIn) return 'ENTRAR';
   if (state.watchAll) return 'INICIANDO';
   return state.rotation ? 'NA FILA' : 'SEM VAGA';
@@ -428,27 +437,14 @@ function renderTargetSelect() {
 }
 
 function renderAccounts() {
-  const nav = $('#accounts');
   const accounts = state.accounts || Array.from({length: 4}, (_, index) => ({id: `account-${index + 1}`, label: `Conta ${index + 1}`}));
-  for (const account of accounts) {
-    let button = nav.querySelector(`[data-account-id="${account.id}"]`);
-    if (!button) {
-      button = el('button', 'account-tab'); button.type = 'button';
-      button.dataset.accountId = account.id;
-      button.onclick = () => selectAccount(account.id);
-      nav.append(button);
-    }
-    const selected = account.id === accountView.accountId;
-    button.classList.toggle('active', selected);
-    button.setAttribute('aria-pressed', String(selected));
-    const detail = account.sessionChecking ? 'Verificando sessão…' : !account.loggedIn ? 'Conectar Twitch'
-      : !account.farming ? 'Coleta pausada' : `${account.watching} lives · +${fmt(account.today || 0)} pts hoje`;
-    button.replaceChildren(el('b', null, account.username || account.label), el('small', null, detail));
-    button.title = `${account.label}${account.username ? ': ' + account.username : ''} — ${detail}`;
-  }
+  accountCards.render(accounts.map(account => ({ ...account,
+    detail: `${account.watching} lives · +${fmt(account.today || 0)} pts hoje`,
+  })), accountView.accountId);
 }
 
 async function selectAccount(id) {
+  accountCards.closeMenu();
   const previous = accountView.accountId;
   if (id === previous) return true;
   const ticket = accountView.select(id);
@@ -456,7 +452,7 @@ async function selectAccount(id) {
   $('#modal').hidden = true; modalKind = null;
   buffers.clear(); unread.clear(); sleepPicked.clear(); active = null;
   $('#messages').replaceChildren(); $('#input').value = ''; $('#toasts').replaceChildren();
-  state = { channels: [], accounts: state.accounts, farming: false, accountId: id };
+  state = { channels: [], accounts: state.accounts, farming: true, accountId: id };
   renderAccounts(); renderTabs(); renderHeader(); renderPanel();
   try {
     const next = await api.selectAccount(id);
@@ -482,7 +478,6 @@ function applyState(s) {
     if (was === true && !ch.live) pushMessage(ch.slug, systemMessage(`${ch.displayName} está offline.`));
   }
   if (!active && state.channels.length) active = state.channels[0].slug;
-  $('#farming').checked = state.farming;
   $('#watch-all').checked = !!state.watchAll;
   $('#max-watchers').disabled = !!state.watchAll;
   $('#rotation').disabled = !!state.watchAll;
@@ -503,11 +498,6 @@ function applyState(s) {
   if (state.intro && !introShown) { introShown = true; showIntro(state.intro); }
   if (!$('#modal').hidden && modalKind === 'sleep') renderSleepList();
   $('#memory').textContent = state.memoryMB ? `${state.memoryMB} MB` : '';
-  $('#btn-login').disabled = !!state.sessionChecking;
-  $('#btn-login').textContent = state.sessionChecking ? 'Verificando sessão…' : state.loggedIn ? '✓ Conectado' : 'Entrar com a Twitch';
-  $('#btn-login').title = state.sessionChecking ? 'Confirmando a sessão salva neste computador.' : state.loggedIn ? 'Conta conectada. Para sair, abra as configurações (⚙).' : 'Abre a Twitch para você fazer login (uma vez só)';
-  $('#btn-login').classList.toggle('ok', !!state.loggedIn);
-  $('#btn-logout').hidden = !state.loggedIn;
   if (document.activeElement !== $('#max-watchers')) $('#max-watchers').value = state.maxWatchers;
   renderTabs();
   renderHeader();
@@ -758,10 +748,7 @@ function celebrate(prev, next) {
 }
 
 // ---------- Eventos ----------
-$('#btn-login').onclick = () => api.showLogin();
-$('#btn-logout').onclick = async () => applyState(await api.logout());
 $('#btn-refresh').onclick = async () => applyState(await api.refresh());
-$('#farming').onchange = async (e) => applyState(await api.setFarming(e.target.checked));
 $('#watch-all').onchange = async (e) => applyState(await api.setWatchAll(e.target.checked));
 $('#btn-limit').onclick = async () => applyState(await (state.limitTest ? api.stopLimitTest() : api.startLimitTest()));
 $('#autostart').onchange = async (e) => applyState(await api.setAutostart(e.target.checked));

@@ -161,10 +161,10 @@ async function freePort() {
     main = await connect(target.webSocketDebuggerUrl);
     await main.call('Runtime.enable');
     await main.call('Page.enable');
-    await until(() => evaluate(main, 'Boolean(window.' + namespace + ' && document.querySelector("#btn-login") && document.querySelector("#composer"))'), 'preload and UI controls');
+    await until(() => evaluate(main, 'Boolean(window.' + namespace + ' && document.querySelector("#accounts .account-tab") && document.querySelector("#composer"))'), 'preload and UI controls');
     const state = await evaluate(main, 'window.' + namespace + '.getState()');
     assert.equal(state.loggedIn, false, 'CI profile must remain unauthenticated');
-    assert.equal(state.farming, false);
+    assert.equal(state.farming, true);
     assert.equal(state.maxWatchers, 2);
     assert.equal(state.rotation, true);
     assert.equal(state.watchAll, false);
@@ -191,20 +191,17 @@ async function freePort() {
       }));
       await screenshot(main, 'public-channels.png');
       assert(report.publicChannels.some(channel => channel.rewardsLoaded && !channel.error), 'No public channel query succeeded');
-      report.farmingToggle = { tested: false, scope: 'anonymous test playback only; no account or point accrual' };
+      report.automaticCollection = { tested: false, scope: 'anonymous test playback only; no account or point accrual' };
       if (observation.channels.some(channel => channel.live && channel.pointsEnabled)) {
-        await evaluate(main, 'document.querySelector("#farming").click()');
-        await until(async () => (await evaluate(main, 'window.tt.getState()')).channels.some(channel => channel.watching), 'player started through the farming toggle');
+        await until(async () => (await evaluate(main, 'window.tt.getState()')).channels.some(channel => channel.watching), 'player starts automatically');
         await pause(5000);
         const playing = await evaluate(main, 'window.tt.getState()');
         assert.equal(playing.farming, true);
-        assert(playing.channels.some(channel => channel.watching), 'Player disappeared after enabling farming');
-        assert(playing.channels.some(channel => channel.live && channel.rewardsLoaded), 'Enabling farming cleared live metadata');
-        report.farmingToggle = { ...report.farmingToggle, tested: true, liveChannels: playing.channels.filter(channel => channel.live).length, watching: playing.channels.filter(channel => channel.watching).length };
+        assert(playing.channels.some(channel => channel.watching), 'Automatic player disappeared');
+        assert(playing.channels.some(channel => channel.live && channel.rewardsLoaded), 'Automatic collection cleared live metadata');
+        report.automaticCollection = { ...report.automaticCollection, tested: true, liveChannels: playing.channels.filter(channel => channel.live).length, watching: playing.channels.filter(channel => channel.watching).length };
         await screenshot(main, 'farming-enabled.png');
-        await evaluate(main, 'document.querySelector("#farming").click()');
-        await until(async () => { const current = await evaluate(main, 'window.tt.getState()'); return !current.farming && !current.channels.some(channel => channel.watching); }, 'player stopped through the farming toggle');
-        report.checks.push('farming toggle started and stopped a real player with public live metadata retained');
+        report.checks.push('automatic collection started a real player with public live metadata retained');
       }
     }
 
@@ -225,7 +222,6 @@ async function freePort() {
       const expected = beforeAll.channels.filter(channel => channel.live).length;
       report.allLivePlayback = { expected, tested: false, scope: 'anonymous playback; no authenticated account or points' };
       if (expected > 0) {
-        await evaluate(main, 'document.querySelector("#farming").click()');
         const allPlaying = await until(async () => {
           const current = await evaluate(main, 'window.tt.getState()');
           return current.channels.filter(channel => channel.watching).length === expected ? current : null;
@@ -253,14 +249,12 @@ async function freePort() {
           await pause(1000);
         }
         await screenshot(main, 'all-live-players.png');
-        await evaluate(main, 'document.querySelector("#farming").click()');
-        await until(async () => { const current = await evaluate(main, 'window.tt.getState()'); return !current.farming && !current.channels.some(channel => channel.watching); }, 'all automatic players stop');
         report.checks.push('all online players started automatically and a player was revealed without reload');
       }
     }
     assert.deepEqual(main.exceptions, [], 'Unexpected main UI JavaScript exception');
 
-    await evaluate(main, 'document.querySelector("#btn-login").click()');
+    await evaluate(main, 'document.querySelector("#accounts .account-tab").click()');
     const loginTarget = await until(async () => (await targets()).find(item => {
         try { const url = new URL(item.url); return item.type === 'page' && url.protocol === 'https:' && (url.hostname === platformHost || url.hostname.endsWith('.' + platformHost)) && url.pathname !== '/robots.txt'; }
         catch { return false; }

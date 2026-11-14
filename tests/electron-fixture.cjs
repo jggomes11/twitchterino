@@ -99,6 +99,7 @@ app.whenReady().then(async () => {
     await ses.clearStorageData();
     console.log('Electron transport fixture: session cookies, fixed destination, redirect refusal, timeout and invalidation passed.');
     server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
+    await require('./account-controls-electron.cjs')();
     app.exit(0);
   } catch (error) {
     console.error(error.message);
