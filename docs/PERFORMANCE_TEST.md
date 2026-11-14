@@ -5,9 +5,9 @@ Build de validação, identificado por commit em build-info.json. Referência an
 ## Preparar uma vez
 
 1. Extraia o ZIP completo. Encerre outras versões de teste e a versão instalada pelo menu da bandeja.
-2. Na pasta extraída, execute `./Start-WindowsValidation.ps1`. O script confere os hashes e abre app/Twitchterino.exe com perfil isolado. Novos slots de teste começam pausados.
+2. Na pasta extraída, execute `./Start-WindowsValidation.ps1`. O script confere os hashes e abre app/Twitchterino.exe com perfil isolado. A coleta inicia automaticamente em cada slot conectado.
 3. Faça login oficial nas mesmas duas contas. Configure duas lives por conta, os mesmos canais e a mesma qualidade efetiva da rodada anterior; mantenha a interface aberta. Confirme os quatro canais que estão efetivamente tocando.
-4. Ative a coleta e confira créditos. O estado “aquecendo” não adia o registro de créditos reais. Canal sub online tem prioridade nas vagas automáticas mesmo após a meta, respeitando pausa, limite de vagas e janelas manuais. Se isso mudar os canais selecionados frente à referência, registre a diferença: a comparação deixa de ter canais idênticos.
+4. Confira os créditos da coleta automática. O estado “aquecendo” não adia o registro de créditos reais. Canal sub online tem prioridade nas vagas automáticas mesmo após a meta, respeitando o limite de vagas e as janelas manuais. Se isso mudar os canais selecionados frente à referência, registre a diferença: a comparação deixa de ter canais idênticos.
 5. Confira resgates reais feitos por você na loja do aplicativo: XP Boost e Capture XP Boost devem entrar no contador correspondente e na duração correta, sem duplicar quando o saldo atualizar. O aplicativo não realiza compras automáticas de recompensas pagas.
 6. Encerre pelo menu da bandeja para salvar a preparação. O PowerShell volta ao prompt. Reabra este mesmo pacote para reutilizar o perfil.
 

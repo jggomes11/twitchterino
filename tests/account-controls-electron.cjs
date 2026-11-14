@@ -2,9 +2,9 @@
 // Native renderer regression fixture: real preload and UI, controlled local IPC only.
 const {BrowserWindow,ipcMain}=require('electron');
 const assert=require('node:assert/strict');
-const fs=require('node:fs');
 const path=require('node:path');
 const {pathToFileURL}=require('node:url');
+const {checkpoint,within,captureAccountScreenshot}=require('./electron-fixture-support.cjs');
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 async function verify(name,namespace){
  const root=path.resolve(__dirname,'..'), calls=[], errors=[];
@@ -26,16 +26,19 @@ async function verify(name,namespace){
  });
  const win=new BrowserWindow({show:false,width:1132,height:850,webPreferences:{contextIsolation:true,sandbox:true,nodeIntegration:false,preload:path.join(root,'preload.js'),additionalArguments:['--app-ui-url='+pathToFileURL(path.join(root,'renderer/index.html')).href]}});
  const wc=win.webContents;
- const evaluate=code=>wc.executeJavaScript(code);
+ const evaluate=code=>within(wc.executeJavaScript(code),'Account renderer evaluation: '+code.slice(0,100));
+ const debug=(method,params)=>within(wc.debugger.sendCommand(method,params),'Account CDP '+method);
  async function until(code){for(let i=0;i<150;i++){if(await evaluate(code))return;await pause(20);}throw new Error('Condition failed: '+code);}
  async function click(selector){await evaluate(`(()=>{const b=document.querySelector(${JSON.stringify(selector)});if(!b)throw Error('Missing control');b.focus();b.click();})()`);}
  const card=id=>`[data-account-id="account-${id}"]`;
  try{
-   await win.loadFile(path.join(root,'renderer/index.html'));
+   checkpoint('account UI load');
+   await within(win.loadFile(path.join(root,'renderer/index.html')),'Account UI load');
    wc.debugger.attach('1.3');
    wc.debugger.on('message',(_event,method,params)=>{if(method==='Runtime.exceptionThrown')errors.push(params.exceptionDetails.text);});
-   await wc.debugger.sendCommand('Runtime.enable');
-   await wc.debugger.sendCommand('Emulation.setDeviceMetricsOverride',{width:1132,height:850,deviceScaleFactor:1,mobile:false});
+   await debug('Runtime.enable');
+   await debug('Emulation.setDeviceMetricsOverride',{width:1132,height:850,deviceScaleFactor:1,mobile:false});
+   checkpoint('account cards and settings geometry');
    await until(`document.querySelectorAll('.account-card').length===4`);
    assert.equal(await evaluate(`document.querySelectorAll('.account-settings:not([hidden])').length`),3);
    assert.equal(await evaluate(`document.querySelector('${card(4)} b').textContent`),'Adicionar conta');
@@ -49,8 +52,8 @@ async function verify(name,namespace){
    await pause(25);
    assert.equal(await evaluate(`document.activeElement===document.querySelector('${card(2)} .account-disconnect')`),true);
    assert.equal(await evaluate(`document.querySelector('${card(2)} .account-menu').hidden`),false);
-   const shot=await wc.debugger.sendCommand('Page.captureScreenshot',{format:'png',clip:{x:0,y:0,width:1132,height:240,scale:1},captureBeyondViewport:true});
-   if(process.env.ACCOUNT_CONTROLS_SCREENSHOTS){fs.mkdirSync(process.env.ACCOUNT_CONTROLS_SCREENSHOTS,{recursive:true});fs.writeFileSync(path.join(process.env.ACCOUNT_CONTROLS_SCREENSHOTS,name+'-account-controls.png'),Buffer.from(shot.data,'base64'));}
+   await captureAccountScreenshot(wc.debugger,name,process.env.ACCOUNT_CONTROLS_SCREENSHOTS);
+   checkpoint('account menu focus and empty-slot login');
    await evaluate(`document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));`);
    assert.equal(await evaluate(`document.activeElement===document.querySelector('${card(2)} .account-settings')`),true);
    await click(card(2)+' .account-settings');await click('#btn-settings');
@@ -60,6 +63,7 @@ async function verify(name,namespace){
    for(let i=0;i<100&&!calls.some(c=>c.command==='login:show');i++)await pause(10);
    assert(calls.some(c=>c.command==='login:show'&&c.id==='account-4'));
    await click(card(1)+' .account-tab');await until(`state.accountId==='account-1'`);
+   checkpoint('account-scoped logout race');
    mode='defer';await click(card(2)+' .account-settings');await click(card(2)+' .account-disconnect');
    for(let i=0;i<100&&!releaseLogout;i++)await pause(10);
    assert(releaseLogout);
@@ -69,6 +73,7 @@ async function verify(name,namespace){
    assert.equal(selected,'account-3');assert.equal(slots[0].loggedIn,true);assert.equal(slots[2].loggedIn,true);
    assert.equal(calls.filter(c=>c.command==='logout').length,1);
    assert.equal(calls.filter(c=>c.command==='login:show').length,1);
+   checkpoint('account logout cancellation and error');
    mode='cancel';await click(card(1)+' .account-settings');await click(card(1)+' .account-disconnect');
    await until(`!document.querySelector('${card(1)} .account-tab').disabled`);
    assert.equal(slots[0].loggedIn,true);
@@ -81,7 +86,8 @@ async function verify(name,namespace){
    slots[3].sessionChecking=true;wc.send('status',snapshot());
    await until(`document.querySelector('${card(4)} .account-tab').disabled`);
    assert.equal(await evaluate(`document.querySelector('${card(4)} .account-settings').hidden`),true);
-   await wc.debugger.sendCommand('Emulation.setDeviceMetricsOverride',{width:600,height:850,deviceScaleFactor:1,mobile:false});
+   checkpoint('account narrow layout');
+   await debug('Emulation.setDeviceMetricsOverride',{width:600,height:850,deviceScaleFactor:1,mobile:false});
    assert.equal(await evaluate(`getComputedStyle(document.querySelector('#accounts')).gridTemplateColumns.split(' ').length`),2);
    assert.equal(await evaluate(`[...document.querySelectorAll('.account-card')].every(c=>c.getBoundingClientRect().right<=innerWidth)`),true);
    assert.deepEqual(errors,[]);
