@@ -33,3 +33,7 @@ A documentação descreve a implementação, incluindo limitações. Não conver
 - `main` consultada no levantamento: `0a0c56971ef1b02faa51bbf9962ab5fa68adc1c9`. **Ela não contém toda a versão publicada.** Não iniciar uma migração apenas copiando `main` sem conferir tag/commit.
 - O checkout auditado acrescenta o workflow/notas de publicação ao código da release. Os commits da documentação são posteriores e não representam outro binário.
 - Escopo: arquivos rastreados de aplicação, segurança, interface, build, workflows, testes e documentação existente. Excluídos `node_modules`, binários extraídos, `.git`, perfis do usuário, cookies e segredos. Não foi feita inspeção de credenciais reais.
+
+## Discussão posterior ao levantamento
+
+A [proposta de protótipo em Tauri](../superpowers/specs/2026-11-12-tauri-performance-prototype-design.md) registra a avaliação tecnológica iniciada depois deste snapshot. É um rascunho para revisão, sem benchmark ou migração concluída.

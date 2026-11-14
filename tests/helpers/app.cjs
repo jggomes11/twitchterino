@@ -9,6 +9,8 @@ const { createRequire } = require('node:module');
 function loadApp({ packaged = false, platform = 'win32', configSeed = null, singleInstance = true, env = {}, argv = [], loginRegistry = new Map() } = {}) {
   const root = path.resolve(__dirname, '../..');
   const state = { scripts: [], requests: [], writes: [], quit: 0, updates: 0, windows: [], ready: [], dialogResponse: 0, sockets: [], timers: [], reloads: [] };
+  state.metricsReads=0; state.intervals=[]; state.trayMenus=[]; state.trayTips=[];
+  state.partnerRequests=[];state.partnerChannels=[];
   state.paths = {}; state.loginItems = []; state.loginQueries = [];
   const cookies = new EventEmitter();
   cookies.get = async ({ name }) => [{ value: name === 'auth-token' || name === 'session_token' ? 'FAKE_ACCOUNT_TOKEN' : 'FAKE_OTHER_COOKIE' }];
@@ -62,7 +64,7 @@ function loadApp({ packaged = false, platform = 'win32', configSeed = null, sing
   Object.assign(app, {
     commandLine: { appendSwitch() {} }, userAgentFallback: 'Chrome/100 Electron/45', isPackaged: packaged,
     getPath: name => state.paths[name] || '/fake/' + name, setPath: (name, value) => { state.paths[name] = value; }, getVersion: () => JSON.parse(fs.readFileSync(path.join(root, 'package.json'))).version,
-    requestSingleInstanceLock: () => singleInstance, quit: () => { state.quit++; }, setAppUserModelId() {}, getAppMetrics: () => [],
+    requestSingleInstanceLock: () => singleInstance, quit: () => { state.quit++; }, setAppUserModelId() {}, getAppMetrics: () => { state.metricsReads++; return []; },
     whenReady: () => ({ then: callback => { state.ready.push(callback); } }),
     getLoginItemSettings: query => {
       state.loginQueries.push(query);
@@ -75,7 +77,7 @@ function loadApp({ packaged = false, platform = 'win32', configSeed = null, sing
   });
   const handlers = new Map();
   const image = { resize() { return this; }, getSize: () => ({ width: 16, height: 16 }) };
-  class Tray extends EventEmitter { setToolTip() {} setContextMenu() {} }
+  class Tray extends EventEmitter { setToolTip(text) {state.trayTips.push(text);} setContextMenu(menu) {state.trayMenus.push(menu);} }
   class Notification extends EventEmitter { static isSupported() { return false; } show() {} }
   const electron = {
     app, BrowserWindow: Window, ipcMain: { handle: (channel, fn) => { handlers.set(channel, fn); } },
@@ -84,7 +86,7 @@ function loadApp({ packaged = false, platform = 'win32', configSeed = null, sing
     Tray, Menu: { buildFromTemplate: () => ({}) }, Notification,
     nativeImage: { createFromPath: () => image, createFromDataURL: () => image },
     powerSaveBlocker: { start: () => 1, stop() {}, isStarted: () => false }, powerMonitor: new EventEmitter(),
-    net: { fetch: async () => new Response('{"channels":[]}') },
+    net: { fetch: async (url,options) => {state.partnerRequests.push({url,options});return new Response(JSON.stringify({channels:state.partnerChannels}));} },
   };
   const ownRequire = createRequire(path.join(root, 'main.js'));
   const context = {
@@ -99,11 +101,13 @@ function loadApp({ packaged = false, platform = 'win32', configSeed = null, sing
     __dirname: root, module: { exports: {} }, Buffer, URL, console, AbortController, TextDecoder,
     process: { platform, env, argv, execPath: '/fake/Twitchterino.exe' },
     setTimeout: (callback, delay) => { const timer = { callback, delay, cancelled: false }; state.timers.push(timer); return timer; },
-    clearTimeout(timer) { if (timer) timer.cancelled = true; }, setInterval: () => 1, clearInterval() {}, setImmediate, queueMicrotask,
+    clearTimeout(timer) { if (timer) timer.cancelled = true; },
+    setInterval(callback,delay) {const timer={callback,delay,cancelled:false};state.intervals.push(timer);return timer;},
+    clearInterval(timer) {if(timer)timer.cancelled=true;}, setImmediate, queueMicrotask,
   };
   vm.createContext(context);
   const runtimeSource = fs.readFileSync(path.join(root, 'account-runtime.js'), 'utf8')
-    .replace('return runtime;', 'runtime.__test = { query: gql, poll, snapshot, setupSession, sendChat, watchRedemptions, setUsername(value) { username = value; }, setup(main, api) { mainWin = main; apiWin = api; apiReady = Promise.resolve(); }, chestScript: FIND_CHEST, status, get config() { return config; }, get client() { return apiClient; } }; return runtime;');
+    .replace('return runtime;', 'runtime.__test = { query: gql, poll, snapshot, setupSession, sendChat, watchRedemptions, setUsername(value) { username = value; }, setup(main, api) { mainWin = main; apiWin = api; apiReady = null; }, chestScript: FIND_CHEST, status, get config() { return config; }, get client() { return apiClient; } }; return runtime;');
   const runtimeContainer = { exports: {} };
   vm.runInContext('(function(require,module,__dirname){' + runtimeSource + '\n})', context, { filename: path.join(root, 'account-runtime.js') })(context.require, runtimeContainer, root);
   const runtimeModule = runtimeContainer.exports;
@@ -133,7 +137,12 @@ function loadApp({ packaged = false, platform = 'win32', configSeed = null, sing
       for (const timer of timers) if (!timer.cancelled) await timer.callback();
       await new Promise(resolve => setImmediate(resolve));
     },
-    async start() { for (const callback of state.ready) await callback(); await new Promise(resolve => setImmediate(resolve)); },
+    async start() {
+      // Real startup has no login window; the placeholder above is only for legacy unit callers.
+      apiExports.setup(main,null);
+      for (const callback of state.ready) await callback();
+      await new Promise(resolve => setImmediate(resolve));
+    },
   };
 }
 module.exports = { loadApp };

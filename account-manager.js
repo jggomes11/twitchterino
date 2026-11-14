@@ -7,24 +7,21 @@ function createAccountManager({ runtimes, initialAccountId = ACCOUNT_IDS[0] }) {
   let activeId = byId.has(initialAccountId) ? initialAccountId : ACCOUNT_IDS[0];
   const get = id => { if (!byId.has(id)) throw new Error('Invalid account'); return byId.get(id); };
   function contexts() { return Object.fromEntries(runtimes.map(r => [r.id, r.getIpcContext()])); }
-  function snapshot(id = activeId) {
-    const selected = get(id).snapshot();
-    const accounts = runtimes.map((r, index) => {
-      const s = r.id === id ? selected : r.snapshot();
-      return { id: r.id, label: 'Conta ' + (index + 1), username: s.username, loggedIn: s.loggedIn,
-        sessionChecking: s.sessionChecking, farming: s.farming, watching: s.channels.filter(c => c.watching).length, today: s.today };
-    });
-    return { ...selected, accountId: id, accounts };
+  function summaries() {
+    return runtimes.map((r,index)=>({...r.summary(),label:'Conta '+(index+1)}));
+  }
+  function snapshot(id = activeId, selected = get(id).snapshot()) {
+    return { ...selected, accountId: id, accounts:summaries() };
   }
   return {
-    contexts, snapshot, get activeId() { return activeId; },
+    contexts, snapshot, summaries, get activeId() { return activeId; },
     select(id) { get(id); activeId = id; return snapshot(); },
     acceptEvent(id) { return id === activeId; },
     async invoke(id, command, args, event) {
       const [checked] = validateIpcArgs('account:command', [{ accountId: id, command, args }], { platform: 'twitch', accounts: contexts() });
       const runtime = get(id); // Captured before any asynchronous account work.
       const result = await runtime.invoke(checked.command, event, checked.args);
-      return { accountId: id, result: Array.isArray(result?.channels) ? snapshot(id) : result };
+      return { accountId: id, result: Array.isArray(result?.channels) ? snapshot(id,result) : result };
     },
   };
 }

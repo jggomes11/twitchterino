@@ -57,6 +57,13 @@ jobs:
         run: node node_modules/electron/install.js
       - name: Run security regression tests
         run: npm test
+      - name: Validate metrics collector on both PowerShell versions
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force validation-output/evidence | Out-Null
+          & ./tests/metrics.test.ps1 -ProofPath ./validation-output/evidence/metrics-pwsh.json
+          & powershell.exe -NoProfile -File ./tests/metrics.test.ps1 -ProofPath ./validation-output/evidence/metrics-windows-powershell.json
+          if ($LASTEXITCODE -ne 0) { throw 'Windows PowerShell metrics tests failed' }
       - name: Validate native Electron session transport
         run: npm run test:electron
       - name: Validate public Twitch transport without an account
@@ -82,6 +89,24 @@ jobs:
       - name: Verify the manual bundle launcher
         if: always() && steps.package.outcome == 'success'
         run: ./validation-output/Start-WindowsValidation.ps1 -CheckOnly
+      - name: Verify packaged application measurement launcher
+        if: success() && steps.package.outcome == 'success'
+        shell: pwsh
+        run: |
+          $SampleDirectory=Join-Path $env:RUNNER_TEMP ('packaged-collector-'+$env:GITHUB_RUN_ID)
+          try {
+            & ./validation-output/Start-WindowsValidation.ps1 -Measure -Diagnostics -WarmupSeconds 0 -DurationSeconds 5 -OutputDirectory $SampleDirectory
+            $Sample=Get-Content (Join-Path $SampleDirectory 'summary.json') -Raw | ConvertFrom-Json
+            if($Sample.samples -lt 1 -or $Sample.endedEarly -or $null -eq $Sample.privateBytes){throw 'Packaged collector integration failed'}
+            @{passed=$true; samples=$Sample.samples; purpose='collector integration only, anonymous isolated profile'; performanceMeasured=$false; naturalExitMeasured=$false} | ConvertTo-Json | Set-Content validation-output/evidence/packaged-collector-smoke.json
+          }finally{
+            $EnvironmentFile=Join-Path $SampleDirectory 'environment.json'
+            if(Test-Path $EnvironmentFile){
+              $SampleEnvironment=Get-Content $EnvironmentFile -Raw | ConvertFrom-Json
+              $SampleRootId=[int]$SampleEnvironment.rootProcessId
+              if($SampleRootId -gt 0){& taskkill.exe /PID $SampleRootId /T /F | Out-Null}
+            }
+          }
       - name: Verify existing-profile selection stays inside the isolated profile root
         if: always() && steps.package.outcome == 'success'
         shell: pwsh

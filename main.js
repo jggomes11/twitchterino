@@ -1,6 +1,6 @@
 'use strict';
 // One application shell; account tokens, players and reports live in scoped runtimes.
-const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, powerMonitor } = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, powerMonitor, net } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const { createHash } = require('node:crypto');
@@ -8,6 +8,9 @@ const { pathToFileURL } = require('node:url');
 const { createAccountRuntime } = require('./account-runtime');
 const { createAccountManager, ACCOUNT_IDS } = require('./account-manager');
 const { createIpcRegistrar } = require('./security/ipc');
+const { createPartnersClient } = require('./security/partners');
+const { createResourceRecorder } = require('./security/diagnostics');
+const publicPartners=createPartnersClient({platform:'twitch',fetch:(url,options)=>net.fetch(url,options)});
 const UI_DOCUMENT = pathToFileURL(path.join(__dirname, 'renderer', 'index.html')).href;
 // Mantém vídeos rodando mesmo com janelas ocultas/minimizadas.
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
@@ -29,6 +32,14 @@ app.userAgentFallback = app.userAgentFallback.replace(/ (Electron|twitchterino|T
 
 let mainWin = null;
 let tray = null;
+let broadcastPending = false;
+let statusInterval = null;
+let trayMenuSignature = null;
+let trayTooltip = null;
+let resourceRecorder = null;
+function recordResources() {
+  if(resourceRecorder)resourceRecorder.record([{role:'main',window:mainWin,manual:true},...runtimes.flatMap(r=>r.resources())]);
+}
 const isLinux = process.platform === 'linux';
 const loginProfilePath = process.platform === 'win32' && customDataPath ? path.resolve(app.getPath('userData')) : null;
 const LOGIN_ITEM = {
@@ -64,13 +75,24 @@ function showMain(accountId) {
 }
 function quitApp() { app.isQuitting = true; app.quit(); }
 function broadcast() {
-  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('status', manager.snapshot());
+  if (broadcastPending || app.isQuitting || !mainWin || mainWin.isDestroyed()) return;
+  broadcastPending=true;
+  queueMicrotask(()=>{
+    broadcastPending=false;
+    if (!app.isQuitting && mainWin && !mainWin.isDestroyed()) {
+      mainWin.webContents.send('status',manager.snapshot());recordResources();
+    }
+  });
 }
 function updateTray() {
   if (!tray) return;
-  const accounts = manager.snapshot().accounts;
+  const accounts = manager.summaries();
   const watching = accounts.reduce((total, account) => total + account.watching, 0);
-  tray.setToolTip(`Twitchterino — ${accounts.filter(a => a.loggedIn).length}/4 contas · ${watching} lives`);
+  const tooltip=`Twitchterino — ${accounts.filter(a => a.loggedIn).length}/4 contas · ${watching} lives`;
+  if(tooltip!==trayTooltip){tray.setToolTip(tooltip);trayTooltip=tooltip;}
+  const signature=JSON.stringify(accounts.map(a=>[a.id,a.username||a.label]));
+  if(signature===trayMenuSignature)return;
+  trayMenuSignature=signature;
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'Abrir Twitchterino', click: () => showMain() },
     ...accounts.map(a => ({ label: a.username || a.label, click: () => showMain(a.id) })),
@@ -86,6 +108,7 @@ const runtimes = ACCOUNT_IDS.map((id, index) => createAccountRuntime({
   id, partition: index === 0 ? 'persist:twitch' : `persist:twitch-account-${index + 1}`,
   dataDirectory: index === 0 ? app.getPath('userData') : path.join(app.getPath('userData'), 'accounts', id),
   emit, onChanged: updateTray, showMain: () => showMain(id), quitApp, isOpenAtLogin, setOpenAtLogin,
+  getPartners:()=>publicPartners.get(),
 }));
 const manager = createAccountManager({ runtimes });
 
@@ -132,15 +155,18 @@ else {
     });
     mainWin.setMenuBarVisibility(false);
     mainWin.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+    mainWin.webContents.on('did-finish-load',recordResources);
     mainWin.on('close', event => { if (!app.isQuitting) { event.preventDefault(); mainWin.hide(); } });
     mainWin.on('query-session-end', () => { app.isQuitting = true; });
     mainWin.on('session-end', () => { app.isQuitting = true; });
     tray = new Tray(nativeImage.createFromPath(path.join(__dirname, 'build', 'icon.png')).resize({ width: 16, height: 16 }));
     tray.on('click', () => showMain());
+    if(process.env.TWITCHTERINO_DIAGNOSTICS==='1')resourceRecorder=createResourceRecorder({fs,directory:app.getPath('userData'),rootProcessId:process.pid,version:app.getVersion()});
     for (const runtime of runtimes) runtime.start(mainWin);
+    statusInterval=setInterval(broadcast,15*1000);
     powerMonitor.on('resume', () => runtimes.forEach(r => r.recoverAfterResume()));
     updateTray();
   });
 }
-app.on('before-quit', () => { app.isQuitting = true; runtimes.forEach(r => r.stop()); });
+app.on('before-quit', () => { app.isQuitting = true; clearInterval(statusInterval); publicPartners.stop();runtimes.forEach(r => r.stop()); });
 app.on('window-all-closed', () => app.quit());
