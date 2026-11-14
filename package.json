@@ -1,8 +1,8 @@
 {
   "name": "twitchterino",
   "productName": "Twitchterino",
-  "version": "0.1.4",
-  "description": "Chat e pontos do canal da Twitch para o PokeIdle: mostra o saldo de cada canal com o preço real dos bônus.",
+  "version": "0.1.6-beta.1",
+  "description": "Chat e pontos do canal da Twitch para o PokeIdle: mostra o saldo de cada canal com o pre\u00e7o real dos b\u00f4nus.",
   "author": "VinniiSaantos",
   "license": "MIT",
   "homepage": "https://github.com/jggomes11/twitchterino#readme",
@@ -54,7 +54,7 @@
       "target": [
         "nsis"
       ],
-      "icon": "build/icon.png"
+      "icon": "build/icon.ico"
     },
     "nsis": {
       "artifactName": "Twitchterino-Setup.exe",

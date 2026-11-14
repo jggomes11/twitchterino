@@ -504,7 +504,7 @@ function applyState(s) {
   if (!$('#modal').hidden && modalKind === 'sleep') renderSleepList();
   $('#memory').textContent = state.memoryMB ? `${state.memoryMB} MB` : '';
   $('#btn-login').disabled = !!state.sessionChecking;
-  $('#btn-login').textContent = state.sessionChecking ? 'Verificando sessão…' : state.loggedIn ? `✓ ${state.username || 'Conectado'}` : 'Entrar com a Twitch';
+  $('#btn-login').textContent = state.sessionChecking ? 'Verificando sessão…' : state.loggedIn ? '✓ Conectado' : 'Entrar com a Twitch';
   $('#btn-login').title = state.sessionChecking ? 'Confirmando a sessão salva neste computador.' : state.loggedIn ? 'Conta conectada. Para sair, abra as configurações (⚙).' : 'Abre a Twitch para você fazer login (uma vez só)';
   $('#btn-login').classList.toggle('ok', !!state.loggedIn);
   $('#btn-logout').hidden = !state.loggedIn;

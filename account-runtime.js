@@ -1,7 +1,7 @@
 'use strict';
 // Maintained single-account behavior; every invocation owns a separate closure and session.
 const {
-  app, BrowserWindow, dialog, session, Notification, powerSaveBlocker, net,
+  app, BrowserWindow, dialog, session, Notification, powerSaveBlocker,
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -10,15 +10,21 @@ const { createPlatformClient } = require('./security/platform');
 const { readCookie } = require('./security/requests');
 const { selectReportAccount } = require('./security/accounts');
 const { chestClickScript } = require('./security/chest');
+const { createTimers } = require('./security/timers');
 const { pathToFileURL } = require('node:url');
 const UI_DOCUMENT = pathToFileURL(path.join(__dirname, 'renderer', 'index.html')).href;
 
-function createAccountRuntime({ id, partition, dataDirectory, emit, onChanged, showMain, quitApp, isOpenAtLogin, setOpenAtLogin }) {
+function createAccountRuntime({ id, partition, dataDirectory, emit, onChanged, showMain, quitApp, isOpenAtLogin, setOpenAtLogin, getPartners }) {
 const updateTray = () => onChanged();
 const commands = new Map();
 const handleIpc = (channel, handler) => commands.set(channel, handler);
 const PARTITION = partition;
 const apiClient = createPlatformClient('twitch', () => session.fromPartition(PARTITION));
+const timers=createTimers({setTimeout,clearTimeout,setInterval,clearInterval});
+const later=timers.after;
+const withTimeout=timers.withTimeout;
+const observedRedemptions=new Set();
+const redemptionPages=new WeakMap();
 let sessionTransition = false;
 let verifiedAccountGeneration = -1;
 let verifiedTokenDigest = null;
@@ -43,6 +49,7 @@ function resetAccountRuntime() {
   cancelAccountWindows();
   for (const slug of [...watchers.keys()]) stopWatcher(slug);
   confirmedChestClaims.clear();
+  observedRedemptions.clear();
   status.clear();
 }
 
@@ -102,10 +109,12 @@ function saveConfig() {
 let mainWin = null;
 let apiWin = null;
 let apiReady = null;
+let loginStartedForAccount = null;
 const watchers = new Map(); // slug -> BrowserWindow
 const status = new Map();   // slug -> estado do canal
 
-function send(channel, payload) { emit(id, channel, payload); }
+function send(channel, payload) { if(!disposed)emit(id, channel, payload); }
+function notifyState() { if(!disposed)emit(id, 'status'); }
 
 // Anúncios e rastreadores de terceiros: não fazem parte da live e só gastam memória/CPU.
 const BLOCKED_HOSTS = [
@@ -125,8 +134,11 @@ function isHiddenWatcher(webContents) {
 
 const ALLOWED_PERMISSIONS = new Set(['fullscreen', 'clipboard-sanitized-write']);
 let authRefreshTimer = null;
+let sessionSetup=false;
 
 function setupSession() {
+  if(sessionSetup)return;
+  sessionSetup=true;
   const ses = session.fromPartition(PARTITION);
   ses.setSpellCheckerEnabled(false);
   ses.setUserAgent(app.userAgentFallback);
@@ -137,9 +149,9 @@ function setupSession() {
   // Cookie events describe storage operations, not whether an account signed out.
   // Check the cookie actually selected by our API before changing the displayed session.
   ses.cookies.on('changed', (_e, changedCookie) => {
-    if (sessionTransition) return;
+    if (disposed || sessionTransition) return;
     if (changedCookie.name !== 'auth-token' || !['twitch.tv', 'www.twitch.tv'].includes(changedCookie.domain.replace(/^\./, ''))) return;
-    clearTimeout(authRefreshTimer);
+    timers.cancel(authRefreshTimer);
     authRefreshTimer = null;
     apiClient.invalidate();
     verifiedAccountGeneration = -1;
@@ -148,11 +160,11 @@ function setupSession() {
     cookieCheckPending = true;
     if (ircSend) { const socket = ircSend; ircSend = null; try { socket.close(); } catch {} }
     const generation = apiClient.generation;
-    authRefreshTimer = setTimeout(async () => {
+    authRefreshTimer = later(async () => {
       authRefreshTimer = null;
       try {
         const token = await authToken();
-        if (sessionTransition || generation !== apiClient.generation || !apiWin || apiWin.isDestroyed()) return;
+        if (disposed || sessionTransition || generation !== apiClient.generation) return;
         cookieCheckPending = false;
         if (!token) {
           verifiedTokenDigest = null;
@@ -160,7 +172,7 @@ function setupSession() {
           loggedIn = false;
           sessionChecking = false;
           resetAccountRuntime();
-          send('status', snapshot());
+          notifyState();
           return;
         }
         if (verifiedTokenDigest && tokenDigest(token) === verifiedTokenDigest && username) {
@@ -170,8 +182,7 @@ function setupSession() {
         } else {
           cancelAccountWindows();
         }
-        if (apiWin.isVisible()) { apiWin.hide(); void loadApi(LIGHT_URL); }
-        send('status', snapshot());
+        notifyState();
         if (loggedIn) reconcileWatchers();
         await poll();
       } catch {
@@ -181,7 +192,7 @@ function setupSession() {
         loggedIn = false;
         cancelAccountWindows();
         reconcileWatchers();
-        send('status', snapshot());
+        notifyState();
       }
     }, 100);
   });
@@ -203,36 +214,42 @@ function lowestQualityOnly(playlist) {
   return [...keep.filter((l) => l.trim()), ...video[0]].join('\n') + '\n';
 }
 
-// Página "vazia" em twitch.tv: mesma origem e cookies, sem carregar o site inteiro.
-const LIGHT_URL = `${TWITCH}/robots.txt`;
-
-const withTimeout = (promise, ms) => Promise.race([
-  promise, new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms)),
-]);
-
-function loadApi(url) {
-  apiReady = new Promise((resolve) => apiWin.webContents.once('did-finish-load', resolve));
-  apiWin.loadURL(url).catch(() => {});
-  return apiReady;
+// The native API uses the Session directly; a renderer is needed only for official login.
+function releaseLoginWindow(win=apiWin) {
+  if(!win)return;
+  if(apiWin===win){apiWin=null;apiReady=null;loginStartedForAccount=null;}
+  if(!win.isDestroyed())win.destroy();
 }
-
 function createApiWindow() {
-  apiWin = new BrowserWindow({
-    width: 1000, height: 780, show: false, title: 'Twitch — login', autoHideMenuBar: true,
-    icon: path.join(__dirname, 'build', 'icon.png'),
-    webPreferences: { partition: PARTITION, backgroundThrottling: false },
+  if(disposed || sessionTransition)throw new Error('Session changed');
+  if(apiWin && !apiWin.isDestroyed())return apiWin;
+  const win=new BrowserWindow({
+    width:1000,height:780,show:false,title:'Twitch — login',autoHideMenuBar:true,
+    icon:path.join(__dirname,'build','icon.png'),
+    webPreferences:{partition:PARTITION,backgroundThrottling:false},
   });
-  apiWin.webContents.setAudioMuted(true);
-  const retryApi = () => setTimeout(() => { if (!apiWin.isVisible()) loadApi(LIGHT_URL); }, 30 * 1000);
-  apiWin.webContents.on('did-fail-load', (_e, code, _desc, _url, isMainFrame) => { if (isMainFrame && code !== -3) retryApi(); });
-  apiWin.webContents.on('render-process-gone', retryApi);
-  loadApi(LIGHT_URL);
-  apiWin.on('close', (e) => {
-    if (app.isQuitting) return;
-    e.preventDefault();
-    apiWin.hide();
-    loadApi(LIGHT_URL).then(poll);
+  apiWin=win;apiReady=null;
+  loginStartedForAccount=loggedIn&&verifiedAccountGeneration===apiClient.generation?config.reportAccount:null;
+  win.webContents.setAudioMuted(true);
+  win.webContents.on('render-process-gone',()=>releaseLoginWindow(win));
+  win.on('closed',()=>{
+    if(apiWin===win){apiWin=null;apiReady=null;loginStartedForAccount=null;}
+    notifyState();
+    if(!disposed && !sessionTransition)void poll();
   });
+  notifyState();
+  return win;
+}
+function loadApi(url,win=apiWin) {
+  if(disposed || sessionTransition || !win || win.isDestroyed())return Promise.reject(new Error('Session changed'));
+  if(apiReady)return apiReady;
+  let onClosed;
+  const closed=new Promise((_,reject)=>{onClosed=()=>reject(new Error('Session changed'));win.once('closed',onClosed);});
+  const task=withTimeout(Promise.race([Promise.resolve().then(()=>win.loadURL(url)),closed]),45000)
+    .catch(()=>{if(!disposed && !sessionTransition && apiWin===win && !win.isDestroyed())throw new Error('Não foi possível abrir o login da Twitch. Tente novamente.');})
+    .finally(()=>{win.removeListener('closed',onClosed);if(apiReady===task)apiReady=null;});
+  apiReady=task;
+  return task;
 }
 
 async function cookie(name) {
@@ -254,13 +271,15 @@ const KINDS = [
   { kind: 'lure', name: '+15% Secret Lure', re: /secret\s*lure|\blure\b/i, def: 1000 },
 ];
 const KIND = Object.fromEntries(KINDS.map((k) => [k.kind, k]));
+// Specific boosts must win over the generic XP word in "Capture XP Boost".
+const REWARD_KINDS = [KIND.capture, KIND.lure, KIND.xp];
 
 function parseRewards(list) {
   const out = [];
   for (const r of list || []) {
     const title = String(r.title || '');
-    if (!/15\s*%|pokeidle|b[oô]nus/i.test(title)) continue;
-    const k = KINDS.find((x) => x.re.test(title));
+    if (!/15\s*%|pokeidle|b[oô]nus|\b(?:capture\s+(?:xp\s+)?|xp\s+)boost\b/i.test(title)) continue;
+    const k = REWARD_KINDS.find((x) => x.re.test(title));
     if (!k) continue;
     const hours = Number((title.match(/\((\d+)\s*h\)/i) || [0, 1])[1]) || 1;
     out.push({ id: r.id, kind: k.kind, hours, cost: r.cost, title, available: !!r.isEnabled && !r.isPaused && r.isInStock !== false });
@@ -394,6 +413,11 @@ function registerDrop(slug, s, drop) {
   s.pendingSpent = (s.pendingSpent || 0) - known;
   drop -= known;
   if (drop < 100) return; // restos de arredondamento ou recompensas baratas que não são bônus
+  if(s.redemptionEpoch===apiClient.generation && s.pendingRedemptions>0) {
+    const deferred=s.deferredRedemptionDrops||(s.deferredRedemptionDrops=[]);
+    if(deferred.length<8)deferred.push(drop);else deferred[7]+=drop;
+    return;
+  }
   const now = Date.now();
   matchPurchase(drop, s.rewards || []).forEach((r, i) => addPurchase({ t: now + i, kind: r.kind, hours: r.hours, cost: r.cost, slug }));
 }
@@ -402,8 +426,29 @@ function registerDrop(slug, s, drop) {
 // app lê o pedido e a resposta. Assim sabe exatamente qual bônus e quantas horas.
 function watchRedemptions(slug, wc) {
   const dbg = wc.debugger;
+  if(redemptionPages.get(wc)===dbg)return;
   if (!dbg.isAttached()) { try { dbg.attach('1.3'); } catch { return; } }
+  redemptionPages.set(wc,dbg);
   const pending = new Map();
+  function finish(operation,cost=0,failed=true) {
+    if(operation.finished)return;
+    operation.finished=true;pending.delete(operation.requestId);timers.cancel(operation.timer);
+    const s=status.get(slug);
+    if(s!==operation.channel || operation.generation!==apiClient.generation || s.redemptionEpoch!==operation.generation)return;
+    s.pendingRedemptions=Math.max(0,(s.pendingRedemptions||0)-1);
+    if(cost>0)s.pendingSpent=(s.pendingSpent||0)+cost;
+    if(failed)s.unconfirmedRedemption=true;
+    if(s.pendingRedemptions===0) {
+      const drops=s.deferredRedemptionDrops||[];s.deferredRedemptionDrops=[];
+      for(const drop of drops) {
+        if(s.unconfirmedRedemption) {
+          const known=Math.min(drop,s.pendingSpent||0);s.pendingSpent=(s.pendingSpent||0)-known;
+        }else registerDrop(slug,s,drop);
+      }
+      s.unconfirmedRedemption=false;
+    }
+  }
+  wc.once?.('destroyed',()=>{for(const operation of [...pending.values()])finish(operation);});
   dbg.on('message', async (_e, method, p) => {
     if (sessionTransition || wc.isDestroyed()) return;
     const generation = apiClient.generation;
@@ -416,30 +461,46 @@ function watchRedemptions(slug, wc) {
         const ops = [].concat(JSON.parse(body));
         const op = ops.find((o) => o.operationName === 'RedeemCustomReward');
         const input = op && op.variables && op.variables.input;
-        if (input) pending.set(p.requestId, { input, generation });
+        if (input && !pending.has(p.requestId)) {
+          if(pending.size>=64)finish(pending.values().next().value);
+          const s=status.get(slug)||{};
+          if(s.redemptionEpoch!==generation){s.redemptionEpoch=generation;s.pendingRedemptions=0;s.deferredRedemptionDrops=[];s.unconfirmedRedemption=false;}
+          s.pendingRedemptions++;
+          status.set(slug,s);
+          const operation={input,generation,channel:s,requestId:p.requestId};
+          pending.set(p.requestId,operation);
+          operation.timer=later(()=>finish(operation),60000);
+        }
       } catch {}
+    } else if (method === 'Network.loadingFailed' && pending.has(p.requestId)) {
+      finish(pending.get(p.requestId));
     } else if (method === 'Network.loadingFinished' && pending.has(p.requestId)) {
       const operation = pending.get(p.requestId);
+      if(operation.readingResponse)return;
+      operation.readingResponse=true;
       const input = operation.input;
-      pending.delete(p.requestId);
       const res = await dbg.sendCommand('Network.getResponseBody', { requestId: p.requestId }).catch(() => null);
-      if (!res || operation.generation !== apiClient.generation || verifiedAccountGeneration !== apiClient.generation || sessionTransition || wc.isDestroyed()) return;
-      let ok = false;
+      if (!res || operation.finished || operation.channel!==status.get(slug) || operation.generation !== apiClient.generation || verifiedAccountGeneration !== apiClient.generation || sessionTransition || wc.isDestroyed()) {finish(operation);return;}
+      let ok = false,redemptionId=null;
       try {
         const r = [].concat(JSON.parse(res.base64Encoded ? Buffer.from(res.body, 'base64').toString() : res.body))
           .find((x) => x.data && 'redeemCustomReward' in x.data);
-        ok = !!r && !!r.data.redeemCustomReward && !r.data.redeemCustomReward.error;
+        const redemption=r?.data?.redeemCustomReward?.redemption;
+        ok = !!r && !r.errors?.length && !!redemption && !Array.isArray(redemption) && !r.data.redeemCustomReward.error;
+        if(typeof redemption?.id==='string'&&redemption.id.length<=128)redemptionId=redemption.id;
       } catch {}
-      if (!ok) return;
+      if (!ok || (redemptionId && observedRedemptions.has(redemptionId))) {finish(operation);return;}
       const s = status.get(slug) || {};
-      s.pendingSpent = (s.pendingSpent || 0) + (Number(input.cost) || 0);
       // The reward ID is authoritative; request titles can be absent or stale.
       const reward = (s.rewards || []).find((r) => r.id && r.id === input.rewardID)
         || parseRewards([{ title: input.title, cost: input.cost, isEnabled: true }])[0];
-      if (reward) addPurchase({ t: Date.now(), kind: reward.kind, hours: reward.hours, cost: reward.cost, slug });
+      const cost=Number(input.cost)||Number(reward?.cost)||0;
+      if(redemptionId){observedRedemptions.add(redemptionId);if(observedRedemptions.size>256)observedRedemptions.delete(observedRedemptions.values().next().value);}
+      if (reward) addPurchase({ t: Date.now(), kind: reward.kind, hours: reward.hours, cost: Number.isFinite(cost)&&cost>0?cost:reward.cost, slug });
+      finish(operation,Number.isFinite(cost)&&cost>0?cost:0,false);
       status.set(slug, s);
       if (configDirty) { configDirty = false; saveConfig(); }
-      send('status', snapshot());
+      notifyState();
       updateTray();
     }
   });
@@ -519,12 +580,10 @@ function weeklyReport(now = Date.now()) {
 }
 
 // Lista de parceiros no site: parceiro novo entra para todos sem precisar de versão nova.
-const PARTNERS_URL = 'https://viinnisantoos.github.io/twitchterino/parceiros.json';
 async function syncPartners() {
   try {
-    const res = await net.fetch(PARTNERS_URL, { cache: 'no-store' });
-    if (!res.ok) return;
-    const list = ((await res.json()).channels || []).map((s) => String(s).toLowerCase()).filter((s) => LOGIN_RE.test(s)).slice(0, 60);
+    const list=await getPartners();
+    if(disposed)return;
     const seen = new Set(config.seenDefaults || []);
     const fresh = list.filter((slug) => !seen.has(slug) && !config.channels.includes(slug));
     config.seenDefaults = [...new Set([...seen, ...list])];
@@ -548,7 +607,7 @@ async function refreshAll() {
   const slugs = config.channels.filter((s) => LOGIN_RE.test(s));
   const fresh = [];
   // A Twitch aceita no máximo 15 consultas por chamada: vai de 10 em 10.
-  for (let i = 0; i < slugs.length; i += 10) {
+  for (let i = 0; i < Math.max(1,slugs.length); i += 10) {
     const part = slugs.slice(i, i + 10);
     const query = `query{ ${i === 0 ? 'currentUser{ id login displayName }' : ''} ${part.map((slug, j) => `c${j}: user(login: ${JSON.stringify(slug)}){ ${CHANNEL_FIELDS} }`).join(' ')} }`;
     let data = null, err = null;
@@ -558,6 +617,8 @@ async function refreshAll() {
       data = json.data;
     } catch (e) { err = String(e.message || e); }
     assertSession(generation);
+    // Until identity is known, keep the old baseline private and leave warming media alive.
+    if(i===0 && !data && verifiedAccountGeneration!==generation)return 'unknown';
     if (data && i === 0) {
       const user = data.currentUser;
       if (user && user.login) {
@@ -604,8 +665,7 @@ async function refreshAll() {
       if (claim && claim !== s.claim) fresh.push(slug);
       s.claim = claim || null;
       const p = cp ? cp.balance : null;
-      if (verifiedAccountGeneration !== generation) { s.points = null; s.bonusTier = null; s.targetTier = null; }
-      updateChannelBalance(slug, s, p);
+      if (verifiedAccountGeneration === generation) updateChannelBalance(slug, s, p);
       status.set(slug, s);
     });
   }
@@ -616,6 +676,7 @@ async function refreshAll() {
     const names = fresh.map((slug) => (status.get(slug) || {}).displayName || slug);
     notify(`🎁 Baú de bônus em ${names.slice(0, 3).join(', ')}${names.length > 3 ? '…' : ''}`, 'Clique para abrir o chat e pegar os pontos extras.', () => openStore(fresh[0]));
   }
+  return verifiedAccountGeneration===generation?'verified':'signed-out';
 }
 
 function updateChannelBalance(slug, s, points) {
@@ -649,7 +710,7 @@ function assertChestOwner(owner) {
 async function waitForChestOwner(owner) {
   // Give the selected-cookie read the same bounded budget as an API request.
   // No account work is accepted while verification is pending.
-  for (let elapsed = 0; elapsed < 20000 && sessionChecking && !sessionTransition; elapsed += 25) await new Promise(resolve => setTimeout(resolve, 25));
+  for (let elapsed = 0; elapsed < 20000 && sessionChecking && !sessionTransition; elapsed += 25) await timers.sleep(25);
   assertChestOwner(owner);
 }
 
@@ -673,10 +734,10 @@ async function runChestQueue() {
   if (!slug) return;
   if (!config.channels.includes(slug) || !(status.get(slug) || {}).claim) { void runChestQueue(); return; }
   chestBusy = slug;
-  send('status', snapshot());
+  notifyState();
   try { await claimChest(slug); } catch {}
   chestBusy = null;
-  send('status', snapshot());
+  notifyState();
   void runChestQueue();
 }
 
@@ -708,7 +769,7 @@ async function confirmChestClaim(slug, claim, before, owner) {
     const noLongerAvailable = points && Object.prototype.hasOwnProperty.call(points, 'availableClaim')
       && (points.availableClaim === null || (typeof points.availableClaim?.id === 'string' && points.availableClaim.id !== claim));
     if (noLongerAvailable && typeof points.balance === 'number' && points.balance >= before + 50) return points.balance;
-    if (attempt < 4) await new Promise(resolve => setTimeout(resolve, 750));
+    if (attempt < 4) await timers.sleep(750);
   }
   throw new Error('Claim not confirmed');
 }
@@ -827,19 +888,20 @@ function handleIrc(raw) {
 }
 
 function connectChat() {
-  if (disposed) return;
+  if (disposed || (irc && irc.readyState <= 1)) return;
   if (typeof WebSocket === 'undefined') return;
   const ws = new WebSocket('wss://irc-ws.chat.twitch.tv:443');
   irc = ws;
   ws.onopen = () => {
+    if(disposed || irc!==ws){try{ws.close();}catch{}return;}
     ws.send('CAP REQ :twitch.tv/tags twitch.tv/commands');
     ws.send('PASS SCHMOOPIIE');
     ws.send(`NICK justinfan${Math.floor(10000 + Math.random() * 80000)}`);
     ircJoined.clear();
     syncChat();
   };
-  ws.onmessage = (e) => String(e.data).split('\r\n').forEach(handleIrc);
-  ws.onclose = () => { if (irc === ws) irc = null; setTimeout(connectChat, 10 * 1000); };
+  ws.onmessage = (e) => {if(!disposed&&irc===ws)String(e.data).split('\r\n').forEach(handleIrc);};
+  ws.onclose = () => { if (irc === ws) irc = null; later(connectChat, 10 * 1000); };
   ws.onerror = () => {};
 }
 
@@ -864,7 +926,7 @@ async function sendChat(slug, content) {
     ws.login = login;
     ws.generation = generation;
     ircSend = ws;
-    ws.ready = new Promise((resolve, reject) => {
+    ws.ready = withTimeout(new Promise((resolve, reject) => {
       ws.onopen = () => {
         if (generation !== apiClient.generation || sessionTransition || ircSend !== ws) { try { ws.close(); } catch {} reject(new Error('Session changed')); return; }
         ws.send(`PASS oauth:${token}`); ws.send(`NICK ${login}`);
@@ -877,8 +939,7 @@ async function sendChat(slug, content) {
         }
       };
       ws.onclose = () => reject(new Error('chat fechou'));
-      setTimeout(() => reject(new Error('timeout')), 10 * 1000);
-    });
+    }), 10 * 1000);
   }
   const socket = ircSend;
   try {
@@ -1000,12 +1061,12 @@ let storeSequence = null;
 function openNextStore() {
   const seq = storeSequence;
   const slug = seq && seq.queue.shift();
-  if (!slug) { storeSequence = null; send('status', snapshot()); return; }
+  if (!slug) { storeSequence = null; notifyState(); return; }
   seq.current = slug;
   seq.done++;
   const name = (status.get(slug) || {}).displayName || slug;
   openStore(slug, `Pontos — ${name} (${seq.done} de ${seq.total})`);
-  send('status', snapshot());
+  notifyState();
 }
 
 // Confere cada live oculta: aviso de conteúdo adulto (só a pessoa pode confirmar) e estado do player.
@@ -1093,12 +1154,13 @@ function goalRank(s) {
 
 const compareGoal = (a, b) => {
   const ra = goalRank(a), rb = goalRank(b);
-  return !!a.cooling - !!b.cooling || !!b.sub - !!a.sub || !a.bonus - !b.bonus || ra.tier - rb.tier || ra.left - rb.left;
+  return !!b.sub - !!a.sub || !!a.cooling - !!b.cooling || !a.bonus - !b.bonus || ra.tier - rb.tier || ra.left - rb.left;
 };
 
 function worthSwitching(candidate, current) {
-  if (candidate.cooling || current.sub) return false;
+  if (current.sub) return false;
   if (candidate.sub) return true;
+  if (candidate.cooling) return false;
   if (candidate.bonus !== current.bonus) return candidate.bonus;
   const c = goalRank(candidate), w = goalRank(current);
   return c.tier < w.tier || (c.tier === w.tier && c.left + SWITCH_MARGIN < w.left);
@@ -1125,8 +1187,8 @@ function reconcileWatchers() {
 
   for (const slug of [...watchers.keys()]) {
     if (isShown(slug)) continue;
-    const idle = !config.watchAll && loggedIn && !limitTest && config.maxWatchers <= 2 && earningState(slug, now) === 'idle';
     const s = status.get(slug);
+    const idle = !s?.subscribed && !config.watchAll && loggedIn && !limitTest && config.maxWatchers <= 2 && earningState(slug, now) === 'idle';
     if (idle && s) s.cooldownUntil = now + IDLE_COOLDOWN_MS;
     if (idle || turnTime(slug, now) >= RECYCLE_MS) stopWatcher(slug);
   }
@@ -1136,20 +1198,20 @@ function reconcileWatchers() {
 
   const focusInfo = (slug) => {
     const s = status.get(slug) || {};
-    const cooling = (s.cooldownUntil || 0) > now;
-    return { points: s.points, rewards: s.rewards, cooling, sub: !!s.subscribed && !cooling, bonus: hasBonus(s) };
+    const cooling = !s.subscribed && (s.cooldownUntil || 0) > now;
+    return { points: s.points, rewards: s.rewards, cooling, sub: !!s.subscribed, bonus: hasBonus(s) };
   };
   const byGoal = (a, b) => compareGoal(focusInfo(a), focusInfo(b));
-  const waiting = config.channels.filter((slug) => !watchers.has(slug) && (status.get(slug) || {}).live && (config.watchAll || (status.get(slug) || {}).pointsEnabled !== false));
+  const waiting = config.channels.filter((slug) => !watchers.has(slug) && (status.get(slug) || {}).live && (config.watchAll || (status.get(slug) || {}).subscribed || (status.get(slug) || {}).pointsEnabled !== false));
   if (config.watchAll) {
     for (const slug of waiting) startWatcher(slug);
     return;
   }
-  if (config.rotation) waiting.sort(byGoal);
+  waiting.sort((a,b) => Number(focusInfo(b).sub)-Number(focusInfo(a).sub) || (config.rotation ? byGoal(a,b) : 0));
   while (watchers.size < config.maxWatchers && waiting.length) startWatcher(waiting.shift());
-  if (!config.rotation) return;
 
   for (const slug of rotatable().sort((a, b) => byGoal(b, a))) {
+    if (!config.rotation && (!waiting.length || !focusInfo(waiting[0]).sub)) break;
     if (!waiting.length || !worthSwitching(focusInfo(waiting[0]), focusInfo(slug))) break;
     stopWatcher(slug);
     startWatcher(waiting.shift());
@@ -1226,6 +1288,11 @@ function limitTestSnapshot() {
   };
 }
 
+function summary() {
+  const confirmed=loggedIn && verifiedAccountGeneration===apiClient.generation;
+  return {id,username:confirmed?username:null,loggedIn,sessionChecking,farming:config.farming,
+    watching:watchers.size,today:confirmed?config.daily[dayKey(Date.now())]||0:0};
+}
 function snapshot() {
   const now = Date.now();
   const confirmedAccount = loggedIn && verifiedAccountGeneration === apiClient.generation;
@@ -1270,7 +1337,7 @@ let pollSequence = 0;
 let loggedIn = false;
 const step = (...a) => { if (process.env.TWITCHTERINO_DEBUG) console.log('STEP', new Date().toISOString().slice(11, 19), ...a); };
 async function poll() {
-  if (sessionTransition || cookieCheckPending) return;
+  if (disposed || sessionTransition || cookieCheckPending) return;
   const generation = apiClient.generation;
   if (polling && pollingGeneration === generation && Date.now() - pollStartedAt < POLL_STUCK_MS) return;
   const startedAt = Date.now();
@@ -1283,16 +1350,18 @@ async function poll() {
     assertSession(generation);
     if (token && verifiedAccountGeneration !== generation) sessionChecking = true;
     step('consulta');
-    await refreshAll();
+    const identity=await refreshAll();
     assertSession(generation);
     step('consulta ok', [...status.values()].filter((s) => s.live).length, 'ao vivo');
     loggedIn = !!token && verifiedAccountGeneration === generation;
-    sessionChecking = false;
-    if (loggedIn) verifiedTokenDigest = tokenDigest(token);
+    sessionChecking = !!token && identity==='unknown';
+    if (loggedIn) {
+      verifiedTokenDigest = tokenDigest(token);
+      if(!loginStartedForAccount || loginStartedForAccount!==config.reportAccount)releaseLoginWindow();
+    }
     if (!token) { username = null; verifiedTokenDigest = null; }
     queueAvailableChests();
     if (configDirty) { configDirty = false; saveConfig(); }
-    if (config.channels.length && config.channels.every((slug) => (status.get(slug) || {}).error) && !apiWin.isVisible()) loadApi(LIGHT_URL);
     advanceLimitTest();
     reconcileWatchers();
     step('lives', watchers.size);
@@ -1300,7 +1369,7 @@ async function poll() {
     assertSession(generation);
     step('players ok');
     logHistory();
-    send('status', snapshot());
+    notifyState();
     updateTray();
     if (process.env.TWITCHTERINO_DEBUG) {
       console.log(JSON.stringify(snapshot()));
@@ -1315,7 +1384,7 @@ async function poll() {
     if (generation === apiClient.generation && !cookieCheckPending && verifiedAccountGeneration !== generation) {
       sessionChecking = false;
       loggedIn = false;
-      send('status', snapshot());
+      notifyState();
     }
   } finally { if (pollSequence === cycle) polling = false; }
 }
@@ -1333,13 +1402,13 @@ function setFarming(on) {
   syncKeepAwake();
   reconcileWatchers();
   updateTray();
-  send('status', snapshot());
+  notifyState();
 }
 
 function recoverAfterResume() {
+  if(disposed)return;
   for (const slug of [...watchers.keys()]) if (!isShown(slug)) stopWatcher(slug);
-  if (!apiWin.isVisible()) loadApi(LIGHT_URL);
-  setTimeout(poll, 15 * 1000);
+  later(poll, 15 * 1000);
 }
 
 handleIpc('state:get', () => snapshot());
@@ -1426,8 +1495,9 @@ handleIpc('lowQuality:set', (_e, on) => {
 });
 handleIpc('refresh', async () => { await poll(); return snapshot(); });
 handleIpc('login:show', async () => {
-  apiWin.show(); apiWin.focus();
-  await loadApi(`${TWITCH}/login`);
+  const win=createApiWindow();
+  win.show();win.focus();
+  await loadApi(`${TWITCH}/login`,win);
 });
 handleIpc('logout', async () => {
   const { response } = await dialog.showMessageBox(mainWin, {
@@ -1437,14 +1507,14 @@ handleIpc('logout', async () => {
   });
   if (response !== 0) return snapshot();
   sessionTransition = true;
-  clearTimeout(authRefreshTimer);
+  timers.cancel(authRefreshTimer);
   authRefreshTimer = null;
   verifiedTokenDigest = null;
   sessionChecking = false;
   cookieCheckPending = false;
   apiClient.suspend();
   try {
-    apiWin.webContents.stop();
+    releaseLoginWindow();
     resetAccountRuntime();
     verifiedAccountGeneration = -1;
     if (ircSend) { try { ircSend.close(); } catch {} ircSend = null; }
@@ -1456,12 +1526,11 @@ handleIpc('logout', async () => {
     status.clear();
     username = null;
     loggedIn = false;
-    loadApi(LIGHT_URL);
   } finally {
     sessionTransition = false;
     apiClient.resume();
   }
-  setTimeout(poll, 0);
+  later(poll, 0);
   return snapshot();
 });
 handleIpc('store:open', (_e, slug) => openStore(slug));
@@ -1477,14 +1546,13 @@ handleIpc('channel:show', (_e, slug) => {
   win.show(); win.focus();
   const s = status.get(slug);
   if (s) s.ageGate = false;
-  send('status', snapshot());
+  notifyState();
 });
 handleIpc('chat:send', (_e, { chatroomId, content }) => sendChat(chatroomId, content));
 
 
 let started = false;
 let disposed = false;
-const intervals = [];
 function start(mainWindow) {
   if (started) return;
   started = true;
@@ -1492,29 +1560,33 @@ function start(mainWindow) {
   loadConfig();
   setupSession();
   syncKeepAwake();
-  createApiWindow();
   connectChat();
-  apiReady.then(poll);
-  intervals.push(setInterval(poll, POLL_MS));
-  intervals.push(setInterval(() => send('status', snapshot()), 15 * 1000));
-  intervals.push(setInterval(() => { checkBonusEnding(); updateTray(); }, 30 * 1000));
-  setTimeout(syncPartners, 30 * 1000);
-  intervals.push(setInterval(syncPartners, 6 * 60 * 60 * 1000));
+  void poll();
+  timers.every(poll, POLL_MS);
+  timers.every(() => { checkBonusEnding(); updateTray(); }, 30 * 1000);
+  later(syncPartners, 30 * 1000);
+  timers.every(syncPartners, 6 * 60 * 60 * 1000);
 }
 function stop() {
   disposed = true;
   sessionTransition = true;
-  clearTimeout(authRefreshTimer);
-  intervals.forEach(clearInterval);
+  timers.cancel(authRefreshTimer);
+  timers.stop();
   apiClient.suspend();
   resetAccountRuntime();
   if (irc) { try { irc.close(); } catch {} }
   if (ircSend) { try { ircSend.close(); } catch {} }
-  if (apiWin && !apiWin.isDestroyed()) apiWin.destroy();
+  releaseLoginWindow();
   if (awakeBlocker != null) { powerSaveBlocker.stop(awakeBlocker); awakeBlocker = null; }
 }
 const runtime = {
-  id, partition, start, stop, poll, snapshot, recoverAfterResume,
+  id, partition, start, stop, poll, snapshot, summary, recoverAfterResume,
+  resources:()=>[
+    {role:'login',accountId:id,window:apiWin,manual:true},
+    ...[...watchers.values()].map(window=>({role:'player',accountId:id,window,manual:userOpened.has(window)})),
+    ...[...storeWindows.values()].map(window=>({role:'store',accountId:id,window,manual:true})),
+    ...[...chestWindows].map(window=>({role:'chest',accountId:id,window,manual:false})),
+  ],
   getIpcContext: () => ({ channels: config.channels, chatroomIds: [], viewport: mainWin?.getContentSize() || [1380, 840] }),
   invoke(command, event, args) {
     const handler = commands.get(command);

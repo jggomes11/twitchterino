@@ -37,6 +37,8 @@ fs.writeFileSync(path.join(stage, 'build-info.json'), JSON.stringify({
 fs.writeFileSync(path.join(stage, 'validation-defaults.json'),
   JSON.stringify(require('./validation-config.cjs')(root, pkg.version), null, 2) + '\n');
 fs.copyFileSync(path.join(root, 'scripts', 'Start-WindowsValidation.ps1'), path.join(stage, 'Start-WindowsValidation.ps1'));
+fs.copyFileSync(path.join(root, 'scripts', 'Measure-Application.ps1'), path.join(stage, 'Measure-Application.ps1'));
+fs.copyFileSync(path.join(root, 'docs', 'PERFORMANCE_TEST.md'), path.join(stage, 'PERFORMANCE_TEST.md'));
 fs.copyFileSync(path.join(root, 'docs', 'WINDOWS_VALIDATION.md'), path.join(stage, 'WINDOWS_VALIDATION.md'));
 console.log('Prepared isolated Windows validation bundle for ' + pkg.name + ' at ' + sourceSha);
 

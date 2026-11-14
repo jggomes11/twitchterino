@@ -1,0 +1,37 @@
+name: Publish verified installer
+on:
+  push:
+    branches: [codex/twitch-status-icon]
+    paths: [.github/workflows/publish-verified-release.yml]
+permissions:
+  actions: read
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SOURCE: a0942c6bb25a6a142fdab5a09c4b199a5b698e00
+      VERSION: 0.1.5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download already validated Windows build
+        run: gh run download 43143531286 --repo "$GITHUB_REPOSITORY" --name 'windows-release-a0942c6bb25a6a142fdab5a09c4b199a5b698e00' --dir release-output
+      - name: Verify source and checksums
+        run: |
+          python3 - <<'PYCODE'
+          import pathlib,json,hashlib,os
+          root=pathlib.Path('release-output')
+          info=json.loads((root/'release-build-info.json').read_text())
+          assert info['sourceSha']==os.environ['SOURCE']
+          assert info['version']==os.environ['VERSION']
+          assert json.loads((root/'account-validation.json').read_text())['passed'] is True
+          for line in (root/'SHA256SUMS.txt').read_text().splitlines():
+              digest,name=line.split()
+              assert pathlib.Path(name).name==name
+              assert hashlib.sha256((root/name).read_bytes()).hexdigest()==digest
+          PYCODE
+      - name: Publish installer release
+        run: |
+          gh release create "v$VERSION" release-output/*.exe release-output/SHA256SUMS.txt release-output/release-build-info.json release-output/account-validation.json --repo "$GITHUB_REPOSITORY" --target "$SOURCE" --title "Twitchterino $VERSION" --notes-file "docs/releases/v$VERSION.pt-BR.md" --latest
