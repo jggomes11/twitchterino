@@ -1,6 +1,8 @@
 name: Windows validation
 
 on:
+  push:
+    tags: ['v[0-9]*']
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
@@ -41,16 +43,29 @@ jobs:
     timeout-minutes: 25
     env:
       VALIDATION_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      BUILD_RELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.release || false }}
+      BUILD_RELEASE: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.release) || false }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
           cache: npm
+      - name: Verify stable tag matches package and main history
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const assert = require('node:assert/strict');
+          const {execFileSync} = require('node:child_process');
+          const version = require('./package.json').version;
+          assert(/^\d+\.\d+\.\d+$/.test(version), 'Expected stable version');
+          assert.equal(process.env.GITHUB_REF_NAME, 'v' + version, 'Tag/package mismatch');
+          execFileSync('git', ['merge-base', '--is-ancestor', 'HEAD', 'origin/main'], {stdio:'inherit'});
+          NODE
       - name: Install locked dependencies without lifecycle scripts
         run: npm ci --ignore-scripts
       - name: Install the pinned Electron runtime
@@ -122,6 +137,10 @@ jobs:
         if: success() && env.BUILD_RELEASE == 'true'
         timeout-minutes: 5
         run: node scripts/validate-accounts.cjs
+      - name: Preserve packaged UI evidence with release candidates
+        if: success() && env.BUILD_RELEASE == 'true'
+        shell: pwsh
+        run: Copy-Item validation-output/evidence/desktop-result.json release-output/desktop-result.json
       - name: Calculate installer checksum
         if: success() && env.BUILD_RELEASE == 'true'
         run: |
@@ -153,7 +172,7 @@ jobs:
 
   publish-release:
     needs: windows
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.release && inputs.publish_release && !inputs.upload_preview
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.release && inputs.publish_release && !inputs.upload_preview)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -181,6 +200,8 @@ jobs:
           assert info['version'] == version and info['accounts'] == 4 and info['applicationWindows'] == 1 and info['distribution'] == 'nsis-installer'
           native = json.loads((root / 'account-validation.json').read_text())
           assert native['passed'] is True and native['sourceSha'] == os.environ['GITHUB_SHA']
+          desktop = json.loads((root / 'desktop-result.json').read_text())
+          assert desktop['passed'] is True and desktop['sourceSha'] == os.environ['GITHUB_SHA']
           expected = {'Twitchterino-Setup.exe'}
           seen = set()
           for line in (root / 'SHA256SUMS.txt').read_text().splitlines():
@@ -196,7 +217,7 @@ jobs:
       - name: Create draft, upload verified assets and publish
         run: |
           gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Twitchterino $RELEASE_VERSION" --notes-file "docs/releases/v$RELEASE_VERSION.pt-BR.md" --draft
-          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" release-output/Twitchterino-Setup.exe release-output/SHA256SUMS.txt release-output/release-build-info.json release-output/account-validation.json
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" release-output/Twitchterino-Setup.exe release-output/SHA256SUMS.txt release-output/release-build-info.json release-output/account-validation.json release-output/desktop-result.json
           gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
 
   upload-preview:

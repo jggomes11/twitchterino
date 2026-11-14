@@ -1,6 +1,6 @@
 # Teste Electron otimizado — Windows
 
-Build experimental, identificado por commit em build-info.json. Referência anterior: Twitchterino0.1.5, duas contas e quatro lives, RAM privada residente mediana2,11GiB e CPU total mediana5,34%. Economia do novo build ainda precisa ser medida. Este pacote usa um perfil próprio, sem copiar cookies do aplicativo instalado.
+Build de validação, identificado por commit em build-info.json. Referência anterior: Twitchterino0.1.5, duas contas e quatro lives, RAM privada residente mediana2,11GiB e CPU total mediana5,34%. Economia do novo build ainda precisa ser medida. Este pacote usa um perfil próprio, sem copiar cookies do aplicativo instalado.
 
 ## Preparar uma vez
 
